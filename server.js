@@ -13,7 +13,8 @@ app.post("/api/agent/chat", async (req, res) => {
   const { message, conversation_id } = req.body || {};
 
   res.json({
-    reply: `🧠 Agent here. I received: "${message}". Your Brain API is now live.`,
+    message: `🧠 Agent here. I received: "${message}". Your Brain API is now live.`,
+
     suggested_actions: [
       { id: "training", label: "Go to Training", intent: "navigate:training" },
       { id: "matches", label: "View Next Match", intent: "navigate:matches" }
