@@ -1,4 +1,13 @@
 import express from "express";
+import {
+  resetAndSync,
+  simulateMatchday,
+  getLeagueTable,
+  getFixtures,
+  getResults,
+  getSeasonStatus,
+  getAllTables,
+} from "./leagues.js";
 
 const app = express();
 app.use(express.json());
@@ -554,5 +563,66 @@ app.get("/api/player/:id/transfers", (req, res) => {
   res.json({ ok: true, interest });
 });
 
+// ──────────────────────────────────────────────
+// EFL LEAGUE & SEASON ENDPOINTS
+//
+// Key design: ALL three leagues share a single
+// matchday counter. One call to simulate-day
+// advances Championship, League 1, and League 2
+// together — they can NEVER go out of sync.
+// ──────────────────────────────────────────────
+
+// Reset all leagues to matchday 0, regenerate fixtures, sync everything
+app.post("/api/seasons/reset-sync", (req, res) => {
+  const result = resetAndSync();
+  res.json(result);
+});
+
+// Simulate ONE matchday across ALL leagues (call this every 24 hours)
+app.post("/api/seasons/simulate-day", (req, res) => {
+  const result = simulateMatchday();
+  res.json(result);
+});
+
+// Get season status overview
+app.get("/api/seasons/status", (req, res) => {
+  res.json(getSeasonStatus());
+});
+
+// Get all three league tables at once
+app.get("/api/leagues", (req, res) => {
+  res.json(getAllTables());
+});
+
+// Get a specific league table
+app.get("/api/leagues/:leagueId/table", (req, res) => {
+  const result = getLeagueTable(req.params.leagueId);
+  if (!result.success) return res.status(404).json(result);
+  res.json(result);
+});
+
+// Get fixtures for a league (optional ?matchday=N query param)
+app.get("/api/leagues/:leagueId/fixtures", (req, res) => {
+  const matchday = req.query.matchday ? parseInt(req.query.matchday) : null;
+  const result = getFixtures(req.params.leagueId, matchday);
+  if (!result.success) return res.status(404).json(result);
+  res.json(result);
+});
+
+// Get completed results for a league (optional ?matchday=N query param)
+app.get("/api/leagues/:leagueId/results", (req, res) => {
+  const matchday = req.query.matchday ? parseInt(req.query.matchday) : null;
+  const result = getResults(req.params.leagueId, matchday);
+  if (!result.success) return res.status(404).json(result);
+  res.json(result);
+});
+
+// ──────────────────────────────────────────────
+// START SERVER
+// ──────────────────────────────────────────────
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Brain API v3.0 running on port", PORT));
+app.listen(PORT, () => {
+  console.log("Brain API v3.0 running on port", PORT);
+  console.log("EFL League system ready — call POST /api/seasons/reset-sync to initialize");
+});
