@@ -15,23 +15,23 @@ const TEAMS = {
     "Bristol City", "Millwall", "Watford", "Swansea City",
     "Preston North End", "Blackburn Rovers", "QPR", "Hull City",
     "Stoke City", "Sheffield Wednesday", "Cardiff City", "Oxford United",
-    "Portsmouth", "Derby County", "Plymouth Argyle", "Luton Town",
+    "Portsmouth", "Southampton", "Plymouth Argyle", "Wrexham",
   ],
   league1: [
     "Wigan Athletic", "Barnsley", "Peterborough United", "Huddersfield Town",
-    "Reading", "Bolton Wanderers", "Stockport County", "Wrexham",
+    "Reading", "Bolton Wanderers", "Stockport County", "Derby County",
     "Charlton Athletic", "Leyton Orient", "Lincoln City", "Stevenage",
     "Wycombe Wanderers", "Exeter City", "Burton Albion", "Mansfield Town",
-    "Northampton Town", "Shrewsbury Town", "Cambridge United", "Bristol Rovers",
-    "Rotherham United", "Cheltenham Town", "Crawley Town", "Port Vale",
+    "Northampton Town", "Shrewsbury Town", "Cambridge United", "Luton Town",
+    "Rotherham United", "Crawley Town", "Port Vale", "Blackpool",
   ],
   league2: [
     "Gillingham", "Carlisle United", "Fleetwood Town", "MK Dons",
-    "Bradford City", "Grimsby Town", "Doncaster Rovers", "Salford City",
+    "Bradford City", "Chesterfield", "Doncaster Rovers", "Salford City",
     "Crewe Alexandra", "Notts County", "Swindon Town", "AFC Wimbledon",
     "Harrogate Town", "Tranmere Rovers", "Morecambe", "Barrow",
-    "Colchester United", "Newport County", "Accrington Stanley", "Walsall",
-    "Forest Green Rovers", "Sutton United", "Rochdale", "Bromley",
+    "Colchester United", "Newport County", "Oldham Athletic", "Bristol Rovers",
+    "Cheltenham Town", "Bromley", "Rochdale", "Accrington Stanley",
   ],
 };
 
@@ -191,19 +191,50 @@ function calculateTable(league) {
 /**
  * Reset all leagues to matchday 0 and regenerate fixtures.
  * This is the SYNC function — all leagues start fresh together.
+ *
+ * @param {Object} [customTeams] - Optional custom team lists from Base44.
+ *   { championship: ["Team A", ...], league1: [...], league2: [...] }
+ *   If provided, uses these instead of defaults.
  */
-export function resetAndSync() {
+export function resetAndSync(customTeams) {
   SEASON.currentMatchday = 0;
   SEASON.startDate = new Date().toISOString();
   SEASON.initialized = true;
 
-  for (const [key, teams] of Object.entries(TEAMS)) {
+  const LEAGUE_META = {
+    championship: { name: "Championship", tier: 1 },
+    league1: { name: "League One", tier: 2 },
+    league2: { name: "League Two", tier: 3 },
+  };
+
+  for (const [key, meta] of Object.entries(LEAGUE_META)) {
+    // Use custom teams if provided, otherwise use defaults
+    const teams = (customTeams && customTeams[key]) ? customTeams[key] : TEAMS[key];
+
+    if (!teams || teams.length < 2) continue;
+
     SEASON.leagues[key] = {
-      name: key === "championship" ? "Championship" : key === "league1" ? "League One" : "League Two",
-      tier: key === "championship" ? 1 : key === "league1" ? 2 : 3,
+      name: meta.name,
+      tier: meta.tier,
       teams: [...teams],
       fixtures: generateFixtures(teams),
     };
+  }
+
+  // Total matchdays depends on team count (n-1 rounds × 2)
+  const firstLeague = Object.values(SEASON.leagues)[0];
+  if (firstLeague) {
+    SEASON.totalMatchdays = (firstLeague.teams.length - 1) * 2;
+  }
+
+  // Build full fixture list per league for Base44 to create Fixture entities
+  const allFixtures = {};
+  for (const [key, league] of Object.entries(SEASON.leagues)) {
+    allFixtures[key] = league.fixtures.map((f) => ({
+      matchday: f.matchday,
+      home: f.home,
+      away: f.away,
+    }));
   }
 
   return {
@@ -216,9 +247,10 @@ export function resetAndSync() {
       id,
       name: l.name,
       tier: l.tier,
-      teams: l.teams.length,
-      fixtures: l.fixtures.length,
+      teams: l.teams,
+      fixtureCount: l.fixtures.length,
     })),
+    fixtures: allFixtures,
   };
 }
 

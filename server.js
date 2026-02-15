@@ -573,8 +573,11 @@ app.get("/api/player/:id/transfers", (req, res) => {
 // ──────────────────────────────────────────────
 
 // Reset all leagues to matchday 0, regenerate fixtures, sync everything
+// Optionally accepts { teams: { championship: [...], league1: [...], league2: [...] } }
+// to use Base44's own team names instead of defaults.
 app.post("/api/seasons/reset-sync", (req, res) => {
-  const result = resetAndSync();
+  const customTeams = req.body && req.body.teams ? req.body.teams : null;
+  const result = resetAndSync(customTeams);
   res.json(result);
 });
 
