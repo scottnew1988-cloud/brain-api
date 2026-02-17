@@ -29,7 +29,7 @@ export async function simulateDayCore(base44: any, options: any = {}) {
 
       // ── 1. Load active season ──────────────────────
       const season = await base44.asServiceRole.entities.Season.findFirst({
-        where: { efl_tier: tier, status: 'ACTIVE' },
+        where: { efl_tier: tier, is_active: true },
       });
 
       if (!season) {
@@ -86,7 +86,7 @@ export async function simulateDayCore(base44: any, options: any = {}) {
 
       if (allFixtures.length > 0) {
         const sample = allFixtures[0];
-        console.log(`[simDay][${tier}] Sample fixture: id=${sample.id}, status=${JSON.stringify(sample.status)}, played_at=${JSON.stringify(sample.played_at)}, home_goals=${JSON.stringify(sample.home_goals)}, away_goals=${JSON.stringify(sample.away_goals)}, home_team_id=${sample.home_team_id}, away_team_id=${sample.away_team_id}, matchday=${JSON.stringify(sample.matchday)} (type: ${typeof sample.matchday})`);
+        console.log(`[simDay][${tier}] Sample fixture: id=${sample.id}, status=${JSON.stringify(sample.status)}, played_at=${JSON.stringify(sample.played_at)}, home_goals=${JSON.stringify(sample.home_goals)}, away_goals=${JSON.stringify(sample.away_goals)}, home_club_id=${sample.home_club_id}, away_club_id=${sample.away_club_id}, matchday=${JSON.stringify(sample.matchday)} (type: ${typeof sample.matchday})`);
       }
 
       // ── 4. Classify fixtures ───────────────────────
@@ -136,8 +136,8 @@ export async function simulateDayCore(base44: any, options: any = {}) {
 
         results.push({
           fixtureId: fixture.id,
-          homeTeamId: fixture.home_team_id,
-          awayTeamId: fixture.away_team_id,
+          homeClubId: fixture.home_club_id,
+          awayClubId: fixture.away_club_id,
           home_goals: homeGoals,
           away_goals: awayGoals,
         });
@@ -216,21 +216,21 @@ export async function simulateDayCore(base44: any, options: any = {}) {
 
       const teamMap: Record<string, any> = {};
       for (const ts of teamSeasons) {
-        teamMap[ts.team_id] = ts;
+        teamMap[ts.club_id] = ts;
       }
 
       const standingUpdates: Record<string, any> = {};
 
       for (const r of results) {
-        const home = teamMap[r.homeTeamId];
-        const away = teamMap[r.awayTeamId];
+        const home = teamMap[r.homeClubId];
+        const away = teamMap[r.awayClubId];
 
         if (!home) {
-          console.warn(`[simDay][${tier}] No TeamSeason for home_team_id=${r.homeTeamId} — skipping`);
+          console.warn(`[simDay][${tier}] No TeamSeason for home_club_id=${r.homeClubId} — skipping`);
           continue;
         }
         if (!away) {
-          console.warn(`[simDay][${tier}] No TeamSeason for away_team_id=${r.awayTeamId} — skipping`);
+          console.warn(`[simDay][${tier}] No TeamSeason for away_club_id=${r.awayClubId} — skipping`);
           continue;
         }
 

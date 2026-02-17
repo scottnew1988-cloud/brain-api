@@ -232,7 +232,7 @@ async function simulateDayCore(base44: any, options: any = {}) {
 }
 
 Deno.serve(async (req) => {
-  const MANUAL_TEST_MODE = true;
+  const MANUAL_TEST_MODE = false;
   if (!MANUAL_TEST_MODE) {
     const p = req.headers.get('x-cron-secret') || '';
     const e = Deno.env.get('CRON_SECRET') || '';
