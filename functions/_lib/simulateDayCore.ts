@@ -111,6 +111,7 @@ export async function simulateDayCore(base44: any, options: any = {}) {
         });
         await base44.asServiceRole.entities.Season.update(season.id, {
           current_matchday: matchday + 1,
+          current_gameweek: matchday + 1,
         });
 
         summary.tiers[tier] = { ok: true, matchday, alreadyPlayed: true };
@@ -337,6 +338,7 @@ export async function simulateDayCore(base44: any, options: any = {}) {
       });
       await base44.asServiceRole.entities.Season.update(season.id, {
         current_matchday: matchday + 1,
+        current_gameweek: matchday + 1,
       });
 
       console.log(`[simDay][${tier}] Matchday advanced: ${matchday} -> ${matchday + 1}`);

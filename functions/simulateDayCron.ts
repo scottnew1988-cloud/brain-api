@@ -120,7 +120,7 @@ async function simulateDayCore(base44: any, options: any = {}) {
       if (played.length === MATCHES_PER_MD && upcoming.length === 0) {
         console.warn(`[sim][${tier}] Already played — advancing`);
         await ent.SeasonProgress.update(progress.id, { current_matchday: matchday + 1 });
-        await ent.Season.update(season.id, { current_matchday: matchday + 1 });
+        await ent.Season.update(season.id, { current_matchday: matchday + 1, current_gameweek: matchday + 1 });
         summary.tiers[tier] = { ok: true, matchday, alreadyPlayed: true };
         continue;
       }
@@ -218,7 +218,7 @@ async function simulateDayCore(base44: any, options: any = {}) {
 
       // 11. Advance matchday
       await ent.SeasonProgress.update(progress.id, { current_matchday: matchday + 1, last_simulated_at: new Date().toISOString() });
-      await ent.Season.update(season.id, { current_matchday: matchday + 1 });
+      await ent.Season.update(season.id, { current_matchday: matchday + 1, current_gameweek: matchday + 1 });
 
       console.log(`[sim][${tier}] DONE md ${matchday} -> ${matchday + 1}`);
       summary.tiers[tier] = { ok: true, matchday, fixturesSimulated: results.length, standingsUpdated: Object.keys(updates).length };
