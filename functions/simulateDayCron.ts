@@ -4,6 +4,20 @@ const EFL_TIERS = ['championship', 'league_one', 'league_two'];
 const MATCHES_PER_MD = 12;
 const TOTAL_MATCHDAYS = 46;
 
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+async function retryWrite(fn: () => Promise<any>, retries = 3, delayMs = 500): Promise<any> {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      if (i === retries) throw err;
+      console.warn(`[retry] Attempt ${i + 1} failed: ${err.message} — retrying in ${delayMs}ms`);
+      await sleep(delayMs * (i + 1));
+    }
+  }
+}
+
 function getRoundRobinPairings(clubIds: string[], matchday: number): [string, string][] {
   const n = clubIds.length;
   const half = n - 1;
@@ -96,13 +110,14 @@ async function simulateDayCore(base44: any, options: any = {}) {
 
         const pairings = getRoundRobinPairings(ids, matchday);
         for (const [hId, aId] of pairings) {
-          await ent.Fixture.create({
+          await retryWrite(() => ent.Fixture.create({
             season_id: season.id, efl_tier: tier, matchday: matchday,
             home_club_id: hId, away_club_id: aId,
             home_club_name: names[hId], away_club_name: names[aId],
             status: 'UPCOMING', home_goals: null, away_goals: null, played_at: null,
             kickoff_at: new Date().toISOString(),
-          });
+          }));
+          await sleep(100);
         }
         fixtures = await ent.Fixture.filter({ season_id: season.id, matchday: matchday });
         console.log(`[sim][${tier}] Generated ${fixtures.length} fixtures`);
@@ -136,14 +151,15 @@ async function simulateDayCore(base44: any, options: any = {}) {
         home_goals: Math.floor(Math.random() * 4), away_goals: Math.floor(Math.random() * 4),
       }));
 
-      // 7. Write fixture results
+      // 7. Write fixture results (with retry + throttle)
       let fixFails = 0;
       for (const r of results) {
         try {
-          await ent.Fixture.update(r.fixtureId, {
+          await retryWrite(() => ent.Fixture.update(r.fixtureId, {
             status: 'PLAYED', home_goals: r.home_goals, away_goals: r.away_goals,
             played_at: new Date().toISOString(),
-          });
+          }));
+          await sleep(100);
         } catch (err: any) { fixFails++; console.error(`[sim][${tier}] Fix write fail: ${err.message}`); }
       }
       if (fixFails > 0) {
@@ -167,11 +183,12 @@ async function simulateDayCore(base44: any, options: any = {}) {
         const clubIds = new Set<string>();
         for (const r of results) { clubIds.add(r.homeClubId); clubIds.add(r.awayClubId); }
         for (const cid of clubIds) {
-          await ent.TeamSeason.create({
+          await retryWrite(() => ent.TeamSeason.create({
             season_id: season.id, club_id: cid, efl_tier: tier,
             played: 0, won: 0, drawn: 0, lost: 0,
             goals_for: 0, goals_against: 0, goal_difference: 0, points: 0,
-          });
+          }));
+          await sleep(100);
         }
         teamSeasons = await ent.TeamSeason.filter({ season_id: season.id });
         console.log(`[sim][${tier}] Created ${teamSeasons.length} TeamSeasons`);
@@ -204,11 +221,12 @@ async function simulateDayCore(base44: any, options: any = {}) {
       for (const tsId of Object.keys(updates)) {
         const d = updates[tsId];
         try {
-          await ent.TeamSeason.update(tsId, {
+          await retryWrite(() => ent.TeamSeason.update(tsId, {
             played: d.played, won: d.won, drawn: d.drawn, lost: d.lost,
             goals_for: d.goals_for, goals_against: d.goals_against,
             goal_difference: d.goals_for - d.goals_against, points: d.points,
-          });
+          }));
+          await sleep(100);
         } catch (err: any) { standFails++; console.error(`[sim][${tier}] Standing fail: ${err.message}`); }
       }
       if (standFails > 0) {
