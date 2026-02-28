@@ -10,9 +10,11 @@ import {
 } from "./leagues.js";
 
 // ── ONLINE SYSTEM MODULES ──────────────────────────────────────────────
-import { createPlayer, updatePlayerProgress, completePlayerCareer } from "./player-careers.js";
-import { runTransferSweep, getSweepStatus, startSweepCron }         from "./sweep.js";
-import { getGlobalLeaderboard }                                      from "./leaderboard.js";
+import { requireJwt, requireHmac, requireCronSecret } from "./auth.js";
+import { initDb }                                      from "./db.js";
+import { createPlayer, updatePlayerProgress, completePlayerCareer, getPlayer } from "./player-careers.js";
+import { runTransferSweep, getSweepStatus }                                     from "./sweep.js";
+import { getGlobalLeaderboard }                                                 from "./leaderboard.js";
 import {
   createGroup,
   joinGroup,
@@ -227,7 +229,7 @@ function detectIntent(text) {
 // GAME DATA LOOKUPS
 // ──────────────────────────────────────────────
 
-function getPlayer(playerId) {
+function getMockPlayer(playerId) {
   return PLAYERS[playerId] || PLAYERS.default;
 }
 
@@ -521,7 +523,7 @@ app.post("/api/agent/chat", async (req, res) => {
   const intent = detectIntent(text);
 
   // Load game context
-  const player = getPlayer(player_id);
+  const player = getMockPlayer(player_id);
   const club = getClub(club_id);
 
   // Assess user engagement level (drives personality tone)
@@ -576,7 +578,7 @@ app.post("/api/agent/chat", async (req, res) => {
 
 // Player context endpoint — lets the UI fetch player data directly
 app.get("/api/player/:id", (req, res) => {
-  const player = getPlayer(req.params.id);
+  const player = getMockPlayer(req.params.id);
   res.json({ ok: true, player });
 });
 
@@ -640,41 +642,40 @@ app.get("/api/leagues/:leagueId/results", (req, res) => {
   res.json(result);
 });
 
+
 // ══════════════════════════════════════════════════════════════════════
-// ──────────────────────────────────────────────────────────────────────
 // ONLINE SYSTEM ROUTES
-// ──────────────────────────────────────────────────────────────────────
+// Auth middleware is applied per-route:
+//   requireJwt         → user-facing endpoints (derives userId from JWT)
+//   requireHmac        → server-to-server player sync from Base44
+//   requireCronSecret  → POST /api/sweep/run (Render Cron Job)
 // ══════════════════════════════════════════════════════════════════════
 
-// ── AUTH HELPER ────────────────────────────────────────────────────────
-// Base44 passes the authenticated user_id in the request body or as a
-// query param. We validate it exists but do not re-verify the token here
-// (that is Base44's responsibility before calling this API).
-function requireUserId(req, res) {
-  const userId =
-    req.body?.user_id ||
-    req.query?.user_id ||
-    req.headers["x-user-id"];
-  if (!userId) {
-    res.status(401).json({ error: "user_id is required (body, query, or X-User-Id header)" });
-    return null;
-  }
-  return userId;
-}
+// Patterns that indicate infrastructure errors — never surfaced to clients
+const INFRA_ERROR_PATTERNS = [
+  /ECONNREFUSED/, /ETIMEDOUT/, /SSL/, /password authentication/,
+  /relation .* does not exist/, /column .* does not exist/,
+];
 
 function apiError(res, err, status = 400) {
   console.error("[API Error]", err.message);
-  res.status(status).json({ error: err.message });
+  const isInfra = INFRA_ERROR_PATTERNS.some((p) => p.test(err.message));
+  if (isInfra) {
+    return res.status(503).json({ error: "Service temporarily unavailable" });
+  }
+  res.status(status).json({ error: err.message || "Internal error" });
 }
 
-// ── HEALTH (extended) ─────────────────────────────────────────────────
+// ── HEALTH (v2) ────────────────────────────────────────────────────────
 
 app.get("/health", (req, res) => {
   res.json({
     ok:      true,
     service: "brain",
-    version: "4.0.0",
+    version: "5.0.0",
     modules: ["leagues", "players", "sweep", "leaderboard", "groups", "squads"],
+    auth:    "JWT + HMAC + CronSecret",
+    storage: "postgres",
   });
 });
 
@@ -684,18 +685,17 @@ app.get("/health", (req, res) => {
 
 /**
  * POST /api/players/create
- * Body: { user_id, player_id, display_name?, overall_rating?, current_league? }
+ * Auth: JWT (user's own session)
+ * Body: { player_id, display_name?, overall_rating?, current_league? }
  *
- * Called by Base44 when FIRST_PRO_CONTRACT event fires.
+ * Called when Base44 fires FIRST_PRO_CONTRACT.
+ * user_id is taken from the JWT — never from the body.
  */
-app.post("/api/players/create", (req, res) => {
-  const userId = requireUserId(req, res);
-  if (!userId) return;
-
+app.post("/api/players/create", requireJwt, async (req, res) => {
   try {
-    const player = createPlayer({
+    const player = await createPlayer({
       player_id:      req.body.player_id,
-      user_id:        userId,
+      user_id:        req.userId,          // JWT-derived
       display_name:   req.body.display_name,
       overall_rating: req.body.overall_rating,
       current_league: req.body.current_league,
@@ -707,21 +707,53 @@ app.post("/api/players/create", (req, res) => {
 });
 
 /**
+ * GET /api/players/:player_id
+ * Auth: JWT
+ */
+app.get("/api/players/:player_id", requireJwt, async (req, res) => {
+  try {
+    const player = await getPlayer(req.params.player_id);
+    if (!player) return res.status(404).json({ error: "Player not found" });
+    // Only the owning coach can view the player
+    if (player.user_id !== req.userId) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    res.json({ ok: true, player });
+  } catch (err) {
+    apiError(res, err);
+  }
+});
+
+/**
  * POST /api/players/:player_id/progress
+ * Auth: HMAC (Base44 server function only — NOT callable from browser)
  * Body: { user_id, overall_rating?, current_league? }
  *
- * Called after training sessions or match events to keep Brain API in sync.
+ * Base44 is the source of truth for player state. This endpoint is the
+ * only way to update rating/league. Clients cannot call it without the
+ * HMAC secret.
+ *
+ * Example (Base44 server function, Node.js):
+ *   const ts  = Date.now().toString();
+ *   const body = JSON.stringify({ user_id, overall_rating, current_league });
+ *   const sig  = "sha256=" + crypto
+ *     .createHmac("sha256", process.env.BRAIN_HMAC_SECRET)
+ *     .update(ts + "." + body).digest("hex");
+ *   await fetch(`${BRAIN_URL}/api/players/${playerId}/progress`, {
+ *     method: "POST",
+ *     headers: { "Content-Type": "application/json",
+ *                "X-Brain-Timestamp": ts,
+ *                "X-Brain-Signature": sig },
+ *     body,
+ *   });
  */
-app.post("/api/players/:player_id/progress", (req, res) => {
-  const userId = requireUserId(req, res);
-  if (!userId) return;
-
+app.post("/api/players/:player_id/progress", requireHmac, async (req, res) => {
   try {
-    const player = updatePlayerProgress(req.params.player_id, {
+    const player = await updatePlayerProgress(req.params.player_id, {
       overall_rating: req.body.overall_rating,
       current_league: req.body.current_league,
     });
-    if (!player) return res.status(404).json({ error: "Player not found" });
+    if (!player) return res.status(404).json({ error: "Active player not found" });
     res.json({ ok: true, player });
   } catch (err) {
     apiError(res, err);
@@ -730,21 +762,15 @@ app.post("/api/players/:player_id/progress", (req, res) => {
 
 /**
  * POST /api/players/:player_id/complete
- * Body: { user_id, display_name? }
+ * Auth: JWT (admin/testing) OR HMAC (Base44 server function)
  *
  * Manually trigger career completion (testing / admin override).
- * The sweep calls completePlayerCareer() internally; this endpoint is for
- * direct invocation from Base44 or test scripts.
+ * The sweep handles batch completions automatically.
+ * user_id for the completion is read from the player row in the DB.
  */
-app.post("/api/players/:player_id/complete", async (req, res) => {
-  const userId = requireUserId(req, res);
-  if (!userId) return;
-
+app.post("/api/players/:player_id/complete", requireJwt, async (req, res) => {
   try {
-    const result = await completePlayerCareer(req.params.player_id, {
-      user_id:      userId,
-      display_name: req.body.display_name,
-    });
+    const result = await completePlayerCareer(req.params.player_id);
     res.json({ ok: true, ...result });
   } catch (err) {
     apiError(res, err);
@@ -752,25 +778,43 @@ app.post("/api/players/:player_id/complete", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════════════
-// TRANSFER SWEEP ENDPOINTS
+// TRANSFER SWEEP
+// POST /api/sweep/run is called by a Render Cron Job (not by users).
+// It uses a separate requireCronSecret middleware.
 // ══════════════════════════════════════════════════════════════════════
 
 /**
  * GET /api/sweep/status
- * Returns scheduling info (no sweep is executed).
+ * Auth: none (public monitoring endpoint)
  */
-app.get("/api/sweep/status", (req, res) => {
-  res.json({ ok: true, ...getSweepStatus() });
+app.get("/api/sweep/status", async (req, res) => {
+  try {
+    const status = await getSweepStatus();
+    res.json({ ok: true, ...status });
+  } catch (err) {
+    apiError(res, err, 500);
+  }
 });
 
 /**
  * POST /api/sweep/run
+ * Auth: CRON_SECRET (Render Cron Job)
  * Body: { force?: boolean }
  *
- * Run the transfer sweep immediately.
- * Set force=true to bypass the UTC-day schedule (for testing).
+ * Render Cron Job configuration:
+ *   Schedule:  0 6 * * *  (daily at 06:00 UTC — safe margin above midnight)
+ *   URL:       https://<your-render-service>.onrender.com/api/sweep/run
+ *   Method:    POST
+ *   Headers:   Authorization: Bearer <CRON_SECRET>
+ *   Body:      {}
+ *
+ * For manual/forced execution (admin only, same CRON_SECRET):
+ *   curl -X POST .../api/sweep/run \
+ *     -H "Authorization: Bearer $CRON_SECRET" \
+ *     -H "Content-Type: application/json" \
+ *     -d '{"force":true}'
  */
-app.post("/api/sweep/run", async (req, res) => {
+app.post("/api/sweep/run", requireCronSecret, async (req, res) => {
   try {
     const force  = Boolean(req.body?.force);
     const result = await runTransferSweep(force);
@@ -785,13 +829,15 @@ app.post("/api/sweep/run", async (req, res) => {
 // ══════════════════════════════════════════════════════════════════════
 
 /**
- * GET /api/leaderboard/global?user_id=...
- * Returns top-100 coaches and the requesting user's rank entry.
+ * GET /api/leaderboard/global
+ * Auth: JWT
+ *
+ * Returns top-100 coaches + the requesting coach's own ranked entry.
+ * userId comes from the verified JWT — not from query params.
  */
-app.get("/api/leaderboard/global", (req, res) => {
-  const userId = req.query.user_id || req.headers["x-user-id"] || null;
+app.get("/api/leaderboard/global", requireJwt, async (req, res) => {
   try {
-    const result = getGlobalLeaderboard(userId);
+    const result = await getGlobalLeaderboard(req.userId);
     res.json({ ok: true, ...result });
   } catch (err) {
     apiError(res, err);
@@ -802,62 +848,40 @@ app.get("/api/leaderboard/global", (req, res) => {
 // FRIEND GROUPS
 // ══════════════════════════════════════════════════════════════════════
 
-/**
- * POST /api/groups/create
- * Body: { user_id, name }
- */
-app.post("/api/groups/create", (req, res) => {
-  const userId = requireUserId(req, res);
-  if (!userId) return;
-
+/** POST /api/groups/create — Auth: JWT; Body: { name } */
+app.post("/api/groups/create", requireJwt, async (req, res) => {
   try {
-    const result = createGroup(userId, { name: req.body.name });
+    const result = await createGroup(req.userId, req.body.name);
     res.json({ ok: true, ...result });
   } catch (err) {
     apiError(res, err);
   }
 });
 
-/**
- * POST /api/groups/join
- * Body: { user_id, invite_code }
- */
-app.post("/api/groups/join", (req, res) => {
-  const userId = requireUserId(req, res);
-  if (!userId) return;
-
+/** POST /api/groups/join — Auth: JWT; Body: { invite_code } */
+app.post("/api/groups/join", requireJwt, async (req, res) => {
   try {
-    const result = joinGroup(userId, req.body.invite_code);
+    const result = await joinGroup(req.userId, req.body.invite_code);
     res.json({ ok: true, ...result });
   } catch (err) {
     apiError(res, err);
   }
 });
 
-/**
- * GET /api/groups/mine?user_id=...
- */
-app.get("/api/groups/mine", (req, res) => {
-  const userId = req.query.user_id || req.headers["x-user-id"];
-  if (!userId) return apiError(res, new Error("user_id required"), 401);
-
+/** GET /api/groups/mine — Auth: JWT */
+app.get("/api/groups/mine", requireJwt, async (req, res) => {
   try {
-    const groups = getMyGroups(userId);
+    const groups = await getMyGroups(req.userId);
     res.json({ ok: true, groups });
   } catch (err) {
     apiError(res, err);
   }
 });
 
-/**
- * GET /api/groups/:group_id/leaderboard?user_id=...
- */
-app.get("/api/groups/:group_id/leaderboard", (req, res) => {
-  const userId = req.query.user_id || req.headers["x-user-id"];
-  if (!userId) return apiError(res, new Error("user_id required"), 401);
-
+/** GET /api/groups/:group_id/leaderboard — Auth: JWT (must be member) */
+app.get("/api/groups/:group_id/leaderboard", requireJwt, async (req, res) => {
   try {
-    const result = getGroupLeaderboard(req.params.group_id, userId);
+    const result = await getGroupLeaderboard(req.params.group_id, req.userId);
     res.json({ ok: true, ...result });
   } catch (err) {
     const status = err.message.includes("not a member") ? 403
@@ -867,16 +891,10 @@ app.get("/api/groups/:group_id/leaderboard", (req, res) => {
   }
 });
 
-/**
- * POST /api/groups/:group_id/leave
- * Body: { user_id }
- */
-app.post("/api/groups/:group_id/leave", (req, res) => {
-  const userId = requireUserId(req, res);
-  if (!userId) return;
-
+/** POST /api/groups/:group_id/leave — Auth: JWT */
+app.post("/api/groups/:group_id/leave", requireJwt, async (req, res) => {
   try {
-    const result = leaveGroup(userId, req.params.group_id);
+    const result = await leaveGroup(req.userId, req.params.group_id);
     res.json({ ok: true, ...result });
   } catch (err) {
     apiError(res, err);
@@ -887,26 +905,22 @@ app.post("/api/groups/:group_id/leave", (req, res) => {
 // COACHING SQUADS
 // ══════════════════════════════════════════════════════════════════════
 
-/**
- * GET /api/squads/leaderboard?limit=50
- */
-app.get("/api/squads/leaderboard", (req, res) => {
+/** GET /api/squads/leaderboard?limit=50 — Auth: none (public) */
+app.get("/api/squads/leaderboard", async (req, res) => {
   try {
     const limit  = Math.min(parseInt(req.query.limit) || 50, 100);
-    const squads = getSquadLeaderboard({ limit });
+    const squads = await getSquadLeaderboard({ limit });
     res.json({ ok: true, squads });
   } catch (err) {
     apiError(res, err);
   }
 });
 
-/**
- * GET /api/squads/search?query=...&limit=20
- */
-app.get("/api/squads/search", (req, res) => {
+/** GET /api/squads/search?query=...&limit=20 — Auth: none (public) */
+app.get("/api/squads/search", async (req, res) => {
   try {
     const limit  = Math.min(parseInt(req.query.limit) || 20, 50);
-    const squads = searchSquads({ query: req.query.query || "", limit });
+    const squads = await searchSquads({ query: req.query.query || "", limit });
     res.json({ ok: true, squads });
   } catch (err) {
     apiError(res, err);
@@ -914,15 +928,12 @@ app.get("/api/squads/search", (req, res) => {
 });
 
 /**
- * POST /api/squads/create
- * Body: { user_id, name, tag?, description?, privacy? }
+ * POST /api/squads/create — Auth: JWT
+ * Body: { name, tag?, description?, privacy? }
  */
-app.post("/api/squads/create", (req, res) => {
-  const userId = requireUserId(req, res);
-  if (!userId) return;
-
+app.post("/api/squads/create", requireJwt, async (req, res) => {
   try {
-    const result = createSquad(userId, {
+    const result = await createSquad(req.userId, {
       name:        req.body.name,
       tag:         req.body.tag,
       description: req.body.description,
@@ -934,80 +945,52 @@ app.post("/api/squads/create", (req, res) => {
   }
 });
 
-/**
- * POST /api/squads/:squad_id/join
- * Body: { user_id }
- * Joins an open squad directly.
- */
-app.post("/api/squads/:squad_id/join", (req, res) => {
-  const userId = requireUserId(req, res);
-  if (!userId) return;
-
+/** POST /api/squads/:squad_id/join — Auth: JWT (open squads only) */
+app.post("/api/squads/:squad_id/join", requireJwt, async (req, res) => {
   try {
-    const result = joinOpenSquad(userId, req.params.squad_id);
+    const result = await joinOpenSquad(req.userId, req.params.squad_id);
     res.json({ ok: true, ...result });
   } catch (err) {
     apiError(res, err);
   }
 });
 
-/**
- * POST /api/squads/:squad_id/request-join
- * Body: { user_id }
- * Submits a join request (for request-privacy squads).
- * For open squads, joins immediately.
- */
-app.post("/api/squads/:squad_id/request-join", (req, res) => {
-  const userId = requireUserId(req, res);
-  if (!userId) return;
-
+/** POST /api/squads/:squad_id/request-join — Auth: JWT */
+app.post("/api/squads/:squad_id/request-join", requireJwt, async (req, res) => {
   try {
-    const result = requestJoinSquad(userId, req.params.squad_id);
+    const result = await requestJoinSquad(req.userId, req.params.squad_id);
     res.json({ ok: true, ...result });
   } catch (err) {
     apiError(res, err);
   }
 });
 
-/**
- * GET /api/squads/mine?user_id=...
- * Returns the user's squad dashboard or null.
- */
-app.get("/api/squads/mine", (req, res) => {
-  const userId = req.query.user_id || req.headers["x-user-id"];
-  if (!userId) return apiError(res, new Error("user_id required"), 401);
-
+/** GET /api/squads/mine — Auth: JWT */
+app.get("/api/squads/mine", requireJwt, async (req, res) => {
   try {
-    const data = getMySquad(userId);
-    res.json({ ok: true, in_squad: !!data, ...( data ?? {}) });
+    const data = await getMySquad(req.userId);
+    res.json({ ok: true, in_squad: !!data, ...(data ?? {}) });
   } catch (err) {
     apiError(res, err);
   }
 });
 
-/**
- * GET /api/squads/:squad_id/profile
- * Public squad profile (no auth required).
- */
-app.get("/api/squads/:squad_id/profile", (req, res) => {
+/** GET /api/squads/:squad_id/profile — Auth: none (public) */
+app.get("/api/squads/:squad_id/profile", async (req, res) => {
   try {
-    const data = getSquadProfile(req.params.squad_id);
+    const data = await getSquadProfile(req.params.squad_id);
     res.json({ ok: true, ...data });
   } catch (err) {
-    apiError(res, err, 404);
+    apiError(res, err, err.message.includes("not found") ? 404 : 400);
   }
 });
 
 /**
- * GET /api/squads/:squad_id/requests?user_id=...
- * Pending join requests (leader/co-leader only).
+ * GET /api/squads/:squad_id/requests — Auth: JWT (leader/co-leader only)
  */
-app.get("/api/squads/:squad_id/requests", (req, res) => {
-  const userId = req.query.user_id || req.headers["x-user-id"];
-  if (!userId) return apiError(res, new Error("user_id required"), 401);
-
+app.get("/api/squads/:squad_id/requests", requireJwt, async (req, res) => {
   try {
-    const requests = getSquadJoinRequests(req.params.squad_id, userId);
+    const requests = await getSquadJoinRequests(req.params.squad_id, req.userId);
     res.json({ ok: true, requests });
   } catch (err) {
     apiError(res, err, err.message.includes("Only") ? 403 : 400);
@@ -1015,17 +998,14 @@ app.get("/api/squads/:squad_id/requests", (req, res) => {
 });
 
 /**
- * POST /api/squads/requests/:request_id/resolve
- * Body: { user_id, action: "approve" | "reject" }
+ * POST /api/squads/requests/:request_id/resolve — Auth: JWT
+ * Body: { action: "approve" | "reject" }
  */
-app.post("/api/squads/requests/:request_id/resolve", (req, res) => {
-  const userId = requireUserId(req, res);
-  if (!userId) return;
-
+app.post("/api/squads/requests/:request_id/resolve", requireJwt, async (req, res) => {
   try {
-    const result = resolveSquadJoinRequest(
+    const result = await resolveSquadJoinRequest(
       req.params.request_id,
-      userId,
+      req.userId,
       req.body.action
     );
     res.json({ ok: true, ...result });
@@ -1034,16 +1014,10 @@ app.post("/api/squads/requests/:request_id/resolve", (req, res) => {
   }
 });
 
-/**
- * POST /api/squads/leave
- * Body: { user_id }
- */
-app.post("/api/squads/leave", (req, res) => {
-  const userId = requireUserId(req, res);
-  if (!userId) return;
-
+/** POST /api/squads/leave — Auth: JWT */
+app.post("/api/squads/leave", requireJwt, async (req, res) => {
   try {
-    const result = leaveSquad(userId);
+    const result = await leaveSquad(req.userId);
     res.json({ ok: true, ...result });
   } catch (err) {
     apiError(res, err);
@@ -1051,17 +1025,13 @@ app.post("/api/squads/leave", (req, res) => {
 });
 
 /**
- * POST /api/squads/:squad_id/upgrade
- * Body: { user_id, facility_type }
- * Leader/co-leader only. Spends unspent_points to upgrade a facility.
+ * POST /api/squads/:squad_id/upgrade — Auth: JWT (leader/co-leader only)
+ * Body: { facility_type }
  */
-app.post("/api/squads/:squad_id/upgrade", (req, res) => {
-  const userId = requireUserId(req, res);
-  if (!userId) return;
-
+app.post("/api/squads/:squad_id/upgrade", requireJwt, async (req, res) => {
   try {
-    const result = upgradeSquadFacility(
-      userId,
+    const result = await upgradeSquadFacility(
+      req.userId,
       req.params.squad_id,
       req.body.facility_type
     );
@@ -1072,16 +1042,13 @@ app.post("/api/squads/:squad_id/upgrade", (req, res) => {
 });
 
 /**
- * POST /api/squads/:squad_id/set-role
- * Body: { user_id (leader), target_user_id, role: "co_leader" | "member" }
+ * POST /api/squads/:squad_id/set-role — Auth: JWT (leader only)
+ * Body: { target_user_id, role: "co_leader" | "member" }
  */
-app.post("/api/squads/:squad_id/set-role", (req, res) => {
-  const userId = requireUserId(req, res);
-  if (!userId) return;
-
+app.post("/api/squads/:squad_id/set-role", requireJwt, async (req, res) => {
   try {
-    const result = setMemberRole(
-      userId,
+    const result = await setMemberRole(
+      req.userId,
       req.body.target_user_id,
       req.params.squad_id,
       req.body.role
@@ -1097,11 +1064,11 @@ app.post("/api/squads/:squad_id/set-role", (req, res) => {
 // ══════════════════════════════════════════════════════════════════════
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log("Brain API v4.0 running on port", PORT);
+app.listen(PORT, async () => {
+  console.log("Brain API v5.0 running on port", PORT);
   console.log("EFL League system ready — call POST /api/seasons/reset-sync to initialize");
-  console.log("Online system ready — leaderboard, friend groups, coaching squads, career completion");
+  console.log("Online system ready — JWT auth, Postgres persistence, Render Cron sweep");
 
-  // Start the transfer sweep background cron (checks every 6 h)
-  startSweepCron();
+  // Connect to DB and verify sweep_state singleton
+  await initDb();
 });

@@ -1,83 +1,100 @@
 // ──────────────────────────────────────────────────────────────────────
 // INDIVIDUAL GLOBAL LEADERBOARD
-// Ranks coaches by:
-//   1) completions_count DESC
-//   2) best_days_to_premier ASC (nulls last)
-//   3) avg_days_to_premier ASC (nulls last)
 //
-// The requesting user always appears in my_entry regardless of rank.
+// All reads come from the coach_stats table — no full user scans.
+// Global rank is computed with a window function so the requesting
+// user always gets their exact position even when outside the top 100.
 // ──────────────────────────────────────────────────────────────────────
 
-import { store, getOrCreateCoachStats } from "./data-store.js";
+import { query } from "./db.js";
 
-// ── SORT COMPARATOR ────────────────────────────────────────────────────
+// ── SORT ORDER ─────────────────────────────────────────────────────────
+// 1. completions_count DESC
+// 2. best_days_to_premier ASC NULLS LAST
+// 3. avg_days_to_premier  ASC NULLS LAST
 
-export function compareCoaches(a, b) {
-  // 1. Most completions first
-  if (b.completions_count !== a.completions_count) {
-    return b.completions_count - a.completions_count;
-  }
-
-  // 2. Fastest best run first (nulls go to the bottom)
-  const aBest = a.best_days_to_premier;
-  const bBest = b.best_days_to_premier;
-  if (aBest === null && bBest === null) { /* fall through */ }
-  else if (aBest === null) return 1;
-  else if (bBest === null) return -1;
-  else if (aBest !== bBest) return aBest - bBest;
-
-  // 3. Lowest average days first (nulls go to the bottom)
-  const aAvg = a.avg_days_to_premier;
-  const bAvg = b.avg_days_to_premier;
-  if (aAvg === null && bAvg === null) return 0;
-  if (aAvg === null) return 1;
-  if (bAvg === null) return -1;
-  return aAvg - bAvg;
-}
-
-function formatCoach(stats, rank) {
-  return {
-    rank,
-    user_id:              stats.user_id,
-    display_name:         stats.display_name,
-    completions_count:    stats.completions_count,
-    best_days_to_premier: stats.best_days_to_premier,
-    avg_days_to_premier:  stats.avg_days_to_premier,
-    updated_at:           stats.updated_at,
-  };
-}
+const ORDER_CLAUSE = `
+  ORDER BY completions_count DESC,
+           best_days_to_premier ASC NULLS LAST,
+           avg_days_to_premier  ASC NULLS LAST
+`;
 
 // ── GLOBAL LEADERBOARD ─────────────────────────────────────────────────
 
 /**
- * Returns the top-100 coaches plus the requesting user's entry.
+ * Return:
+ *  - leaderboard: top 100 coaches with rank
+ *  - my_entry:    requesting coach's row with their true global rank
+ *                 (always present, even if outside top 100)
+ *  - total_coaches: total number of coaches on the board
  *
- * my_entry is guaranteed to be present even when the user is:
- *   - Outside the top 100 (their true rank is shown)
- *   - Not yet on the board (rank = total + 1, all zeros)
- *
- * @param {string} userId - Requesting coach's user_id
- * @returns {{ leaderboard: Object[], my_entry: Object, total_coaches: number }}
+ * @param {string} userId  — derived from JWT (req.userId); never trusted from client
+ * @returns {Promise<Object>}
  */
-export function getGlobalLeaderboard(userId) {
-  const sorted  = [...store.coachStats.values()].sort(compareCoaches);
-  const top100  = sorted.slice(0, 100).map((s, i) => formatCoach(s, i + 1));
+export async function getGlobalLeaderboard(userId) {
+  // Single query: rank all coaches, then select top 100 + the user's row
+  const { rows } = await query(
+    `WITH ranked AS (
+       SELECT
+         user_id,
+         display_name,
+         completions_count,
+         best_days_to_premier,
+         avg_days_to_premier,
+         updated_at,
+         ROW_NUMBER() OVER (${ORDER_CLAUSE}) AS rank,
+         COUNT(*) OVER ()                    AS total_coaches
+       FROM coach_stats
+     )
+     SELECT * FROM ranked
+     WHERE rank <= 100 OR user_id = $1
+     ${ORDER_CLAUSE}`,
+    [userId]
+  );
 
-  let myEntry = null;
-  if (userId) {
-    const myIdx = sorted.findIndex((s) => s.user_id === userId);
-    if (myIdx !== -1) {
-      myEntry = formatCoach(sorted[myIdx], myIdx + 1);
-    } else {
-      // User has no stats yet — create a zeroed placeholder
-      const stats = getOrCreateCoachStats(userId);
-      myEntry = formatCoach(stats, sorted.length + 1);
-    }
+  if (!rows.length) {
+    // No coaches on the board yet — upsert a zeroed entry for this user
+    await query(
+      `INSERT INTO coach_stats (user_id) VALUES ($1)
+       ON CONFLICT (user_id) DO NOTHING`,
+      [userId]
+    );
+    return {
+      leaderboard:   [],
+      my_entry:      { rank: 1, user_id: userId, display_name: null, completions_count: 0, best_days_to_premier: null, avg_days_to_premier: null },
+      total_coaches: 0,
+    };
+  }
+
+  const totalCoaches = Number(rows[0].total_coaches);
+  const top100       = rows.filter((r) => Number(r.rank) <= 100).map(formatRow);
+
+  let myEntry = rows.find((r) => r.user_id === userId);
+  if (!myEntry && userId) {
+    // User not yet on the board — show them at rank total+1 with zeros
+    await query(
+      `INSERT INTO coach_stats (user_id) VALUES ($1)
+       ON CONFLICT (user_id) DO NOTHING`,
+      [userId]
+    );
+    myEntry = { user_id: userId, display_name: null, completions_count: 0, best_days_to_premier: null, avg_days_to_premier: null, rank: totalCoaches + 1, updated_at: null };
   }
 
   return {
-    leaderboard:    top100,
-    my_entry:       myEntry,
-    total_coaches:  sorted.length,
+    leaderboard:   top100,
+    my_entry:      myEntry ? formatRow(myEntry) : null,
+    total_coaches: totalCoaches,
+  };
+}
+
+function formatRow(r) {
+  return {
+    rank:                 Number(r.rank),
+    user_id:              r.user_id,
+    display_name:         r.display_name,
+    completions_count:    Number(r.completions_count),
+    best_days_to_premier: r.best_days_to_premier !== null ? Number(r.best_days_to_premier) : null,
+    avg_days_to_premier:  r.avg_days_to_premier  !== null ? Number(r.avg_days_to_premier)  : null,
+    updated_at:           r.updated_at,
   };
 }
