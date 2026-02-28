@@ -9,6 +9,32 @@ import {
   getAllTables,
 } from "./leagues.js";
 
+// ── ONLINE SYSTEM MODULES ──────────────────────────────────────────────
+import { createPlayer, updatePlayerProgress, completePlayerCareer } from "./player-careers.js";
+import { runTransferSweep, getSweepStatus, startSweepCron }         from "./sweep.js";
+import { getGlobalLeaderboard }                                      from "./leaderboard.js";
+import {
+  createGroup,
+  joinGroup,
+  getMyGroups,
+  getGroupLeaderboard,
+  leaveGroup,
+} from "./groups.js";
+import {
+  getSquadLeaderboard,
+  searchSquads,
+  createSquad,
+  joinOpenSquad,
+  requestJoinSquad,
+  getMySquad,
+  getSquadProfile,
+  getSquadJoinRequests,
+  resolveSquadJoinRequest,
+  leaveSquad,
+  upgradeSquadFacility,
+  setMemberRole,
+} from "./squads.js";
+
 const app = express();
 app.use(express.json());
 
@@ -476,10 +502,7 @@ function buildGeneralResponse(player, text, engagement) {
 // ROUTES
 // ──────────────────────────────────────────────
 
-// Health check
-app.get("/health", (req, res) => {
-  res.json({ ok: true, service: "brain", version: "3.0.0" });
-});
+// Health — see extended /health definition in the Online System section below
 
 // MAIN AGENT ENDPOINT
 app.post("/api/agent/chat", async (req, res) => {
@@ -617,12 +640,468 @@ app.get("/api/leagues/:leagueId/results", (req, res) => {
   res.json(result);
 });
 
-// ──────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+// ──────────────────────────────────────────────────────────────────────
+// ONLINE SYSTEM ROUTES
+// ──────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// ── AUTH HELPER ────────────────────────────────────────────────────────
+// Base44 passes the authenticated user_id in the request body or as a
+// query param. We validate it exists but do not re-verify the token here
+// (that is Base44's responsibility before calling this API).
+function requireUserId(req, res) {
+  const userId =
+    req.body?.user_id ||
+    req.query?.user_id ||
+    req.headers["x-user-id"];
+  if (!userId) {
+    res.status(401).json({ error: "user_id is required (body, query, or X-User-Id header)" });
+    return null;
+  }
+  return userId;
+}
+
+function apiError(res, err, status = 400) {
+  console.error("[API Error]", err.message);
+  res.status(status).json({ error: err.message });
+}
+
+// ── HEALTH (extended) ─────────────────────────────────────────────────
+
+app.get("/health", (req, res) => {
+  res.json({
+    ok:      true,
+    service: "brain",
+    version: "4.0.0",
+    modules: ["leagues", "players", "sweep", "leaderboard", "groups", "squads"],
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// PLAYER CAREER ENDPOINTS
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * POST /api/players/create
+ * Body: { user_id, player_id, display_name?, overall_rating?, current_league? }
+ *
+ * Called by Base44 when FIRST_PRO_CONTRACT event fires.
+ */
+app.post("/api/players/create", (req, res) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+
+  try {
+    const player = createPlayer({
+      player_id:      req.body.player_id,
+      user_id:        userId,
+      display_name:   req.body.display_name,
+      overall_rating: req.body.overall_rating,
+      current_league: req.body.current_league,
+    });
+    res.json({ ok: true, player });
+  } catch (err) {
+    apiError(res, err);
+  }
+});
+
+/**
+ * POST /api/players/:player_id/progress
+ * Body: { user_id, overall_rating?, current_league? }
+ *
+ * Called after training sessions or match events to keep Brain API in sync.
+ */
+app.post("/api/players/:player_id/progress", (req, res) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+
+  try {
+    const player = updatePlayerProgress(req.params.player_id, {
+      overall_rating: req.body.overall_rating,
+      current_league: req.body.current_league,
+    });
+    if (!player) return res.status(404).json({ error: "Player not found" });
+    res.json({ ok: true, player });
+  } catch (err) {
+    apiError(res, err);
+  }
+});
+
+/**
+ * POST /api/players/:player_id/complete
+ * Body: { user_id, display_name? }
+ *
+ * Manually trigger career completion (testing / admin override).
+ * The sweep calls completePlayerCareer() internally; this endpoint is for
+ * direct invocation from Base44 or test scripts.
+ */
+app.post("/api/players/:player_id/complete", async (req, res) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+
+  try {
+    const result = await completePlayerCareer(req.params.player_id, {
+      user_id:      userId,
+      display_name: req.body.display_name,
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    apiError(res, err);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// TRANSFER SWEEP ENDPOINTS
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/sweep/status
+ * Returns scheduling info (no sweep is executed).
+ */
+app.get("/api/sweep/status", (req, res) => {
+  res.json({ ok: true, ...getSweepStatus() });
+});
+
+/**
+ * POST /api/sweep/run
+ * Body: { force?: boolean }
+ *
+ * Run the transfer sweep immediately.
+ * Set force=true to bypass the UTC-day schedule (for testing).
+ */
+app.post("/api/sweep/run", async (req, res) => {
+  try {
+    const force  = Boolean(req.body?.force);
+    const result = await runTransferSweep(force);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    apiError(res, err, 500);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// INDIVIDUAL GLOBAL LEADERBOARD
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/leaderboard/global?user_id=...
+ * Returns top-100 coaches and the requesting user's rank entry.
+ */
+app.get("/api/leaderboard/global", (req, res) => {
+  const userId = req.query.user_id || req.headers["x-user-id"] || null;
+  try {
+    const result = getGlobalLeaderboard(userId);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    apiError(res, err);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// FRIEND GROUPS
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * POST /api/groups/create
+ * Body: { user_id, name }
+ */
+app.post("/api/groups/create", (req, res) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+
+  try {
+    const result = createGroup(userId, { name: req.body.name });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    apiError(res, err);
+  }
+});
+
+/**
+ * POST /api/groups/join
+ * Body: { user_id, invite_code }
+ */
+app.post("/api/groups/join", (req, res) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+
+  try {
+    const result = joinGroup(userId, req.body.invite_code);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    apiError(res, err);
+  }
+});
+
+/**
+ * GET /api/groups/mine?user_id=...
+ */
+app.get("/api/groups/mine", (req, res) => {
+  const userId = req.query.user_id || req.headers["x-user-id"];
+  if (!userId) return apiError(res, new Error("user_id required"), 401);
+
+  try {
+    const groups = getMyGroups(userId);
+    res.json({ ok: true, groups });
+  } catch (err) {
+    apiError(res, err);
+  }
+});
+
+/**
+ * GET /api/groups/:group_id/leaderboard?user_id=...
+ */
+app.get("/api/groups/:group_id/leaderboard", (req, res) => {
+  const userId = req.query.user_id || req.headers["x-user-id"];
+  if (!userId) return apiError(res, new Error("user_id required"), 401);
+
+  try {
+    const result = getGroupLeaderboard(req.params.group_id, userId);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    const status = err.message.includes("not a member") ? 403
+                 : err.message.includes("not found")    ? 404
+                 : 400;
+    apiError(res, err, status);
+  }
+});
+
+/**
+ * POST /api/groups/:group_id/leave
+ * Body: { user_id }
+ */
+app.post("/api/groups/:group_id/leave", (req, res) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+
+  try {
+    const result = leaveGroup(userId, req.params.group_id);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    apiError(res, err);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// COACHING SQUADS
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/squads/leaderboard?limit=50
+ */
+app.get("/api/squads/leaderboard", (req, res) => {
+  try {
+    const limit  = Math.min(parseInt(req.query.limit) || 50, 100);
+    const squads = getSquadLeaderboard({ limit });
+    res.json({ ok: true, squads });
+  } catch (err) {
+    apiError(res, err);
+  }
+});
+
+/**
+ * GET /api/squads/search?query=...&limit=20
+ */
+app.get("/api/squads/search", (req, res) => {
+  try {
+    const limit  = Math.min(parseInt(req.query.limit) || 20, 50);
+    const squads = searchSquads({ query: req.query.query || "", limit });
+    res.json({ ok: true, squads });
+  } catch (err) {
+    apiError(res, err);
+  }
+});
+
+/**
+ * POST /api/squads/create
+ * Body: { user_id, name, tag?, description?, privacy? }
+ */
+app.post("/api/squads/create", (req, res) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+
+  try {
+    const result = createSquad(userId, {
+      name:        req.body.name,
+      tag:         req.body.tag,
+      description: req.body.description,
+      privacy:     req.body.privacy,
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    apiError(res, err);
+  }
+});
+
+/**
+ * POST /api/squads/:squad_id/join
+ * Body: { user_id }
+ * Joins an open squad directly.
+ */
+app.post("/api/squads/:squad_id/join", (req, res) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+
+  try {
+    const result = joinOpenSquad(userId, req.params.squad_id);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    apiError(res, err);
+  }
+});
+
+/**
+ * POST /api/squads/:squad_id/request-join
+ * Body: { user_id }
+ * Submits a join request (for request-privacy squads).
+ * For open squads, joins immediately.
+ */
+app.post("/api/squads/:squad_id/request-join", (req, res) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+
+  try {
+    const result = requestJoinSquad(userId, req.params.squad_id);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    apiError(res, err);
+  }
+});
+
+/**
+ * GET /api/squads/mine?user_id=...
+ * Returns the user's squad dashboard or null.
+ */
+app.get("/api/squads/mine", (req, res) => {
+  const userId = req.query.user_id || req.headers["x-user-id"];
+  if (!userId) return apiError(res, new Error("user_id required"), 401);
+
+  try {
+    const data = getMySquad(userId);
+    res.json({ ok: true, in_squad: !!data, ...( data ?? {}) });
+  } catch (err) {
+    apiError(res, err);
+  }
+});
+
+/**
+ * GET /api/squads/:squad_id/profile
+ * Public squad profile (no auth required).
+ */
+app.get("/api/squads/:squad_id/profile", (req, res) => {
+  try {
+    const data = getSquadProfile(req.params.squad_id);
+    res.json({ ok: true, ...data });
+  } catch (err) {
+    apiError(res, err, 404);
+  }
+});
+
+/**
+ * GET /api/squads/:squad_id/requests?user_id=...
+ * Pending join requests (leader/co-leader only).
+ */
+app.get("/api/squads/:squad_id/requests", (req, res) => {
+  const userId = req.query.user_id || req.headers["x-user-id"];
+  if (!userId) return apiError(res, new Error("user_id required"), 401);
+
+  try {
+    const requests = getSquadJoinRequests(req.params.squad_id, userId);
+    res.json({ ok: true, requests });
+  } catch (err) {
+    apiError(res, err, err.message.includes("Only") ? 403 : 400);
+  }
+});
+
+/**
+ * POST /api/squads/requests/:request_id/resolve
+ * Body: { user_id, action: "approve" | "reject" }
+ */
+app.post("/api/squads/requests/:request_id/resolve", (req, res) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+
+  try {
+    const result = resolveSquadJoinRequest(
+      req.params.request_id,
+      userId,
+      req.body.action
+    );
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    apiError(res, err, err.message.includes("Only") ? 403 : 400);
+  }
+});
+
+/**
+ * POST /api/squads/leave
+ * Body: { user_id }
+ */
+app.post("/api/squads/leave", (req, res) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+
+  try {
+    const result = leaveSquad(userId);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    apiError(res, err);
+  }
+});
+
+/**
+ * POST /api/squads/:squad_id/upgrade
+ * Body: { user_id, facility_type }
+ * Leader/co-leader only. Spends unspent_points to upgrade a facility.
+ */
+app.post("/api/squads/:squad_id/upgrade", (req, res) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+
+  try {
+    const result = upgradeSquadFacility(
+      userId,
+      req.params.squad_id,
+      req.body.facility_type
+    );
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    apiError(res, err, err.message.includes("Only") ? 403 : 400);
+  }
+});
+
+/**
+ * POST /api/squads/:squad_id/set-role
+ * Body: { user_id (leader), target_user_id, role: "co_leader" | "member" }
+ */
+app.post("/api/squads/:squad_id/set-role", (req, res) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+
+  try {
+    const result = setMemberRole(
+      userId,
+      req.body.target_user_id,
+      req.params.squad_id,
+      req.body.role
+    );
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    apiError(res, err, err.message.includes("Only") ? 403 : 400);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════
 // START SERVER
-// ──────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("Brain API v3.0 running on port", PORT);
+  console.log("Brain API v4.0 running on port", PORT);
   console.log("EFL League system ready — call POST /api/seasons/reset-sync to initialize");
+  console.log("Online system ready — leaderboard, friend groups, coaching squads, career completion");
+
+  // Start the transfer sweep background cron (checks every 6 h)
+  startSweepCron();
 });
