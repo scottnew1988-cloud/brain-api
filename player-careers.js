@@ -202,12 +202,13 @@ export async function completePlayerCareer(player_id, externalClient = null) {
     if (memberRows.length) {
       const membership = memberRows[0];
 
-      await client.query(
+      const { rows: [squad] } = await client.query(
         `UPDATE coaching_squads
          SET total_points = total_points + 1,
              unspent_points = unspent_points + 1,
              updated_at = NOW()
-         WHERE id = $1`,
+         WHERE id = $1
+         RETURNING name, total_points, unspent_points`,
         [membership.squad_id]
       );
 
@@ -224,11 +225,6 @@ export async function completePlayerCareer(player_id, externalClient = null) {
          VALUES ($1, $2, 1, 'premier_completion')
          RETURNING id`,
         [membership.squad_id, player.user_id]
-      );
-
-      const { rows: [squad] } = await client.query(
-        "SELECT name, total_points, unspent_points FROM coaching_squads WHERE id = $1",
-        [membership.squad_id]
       );
 
       squadUpdate = {

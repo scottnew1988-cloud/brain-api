@@ -165,6 +165,7 @@ CREATE TABLE IF NOT EXISTS coaching_squad_join_requests (
 );
 
 CREATE INDEX IF NOT EXISTS csjr_squad_status_idx ON coaching_squad_join_requests(squad_id, status);
+CREATE INDEX IF NOT EXISTS csjr_squad_user_idx   ON coaching_squad_join_requests(squad_id, user_id);
 
 -- ── SQUAD FACILITIES ───────────────────────────────────────────────────
 -- One row per (squad, facility_type). Initialised at level 0 on squad creation.

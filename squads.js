@@ -95,18 +95,27 @@ async function fetchMembers(squadId) {
 
 // ── LEADERBOARD ────────────────────────────────────────────────────────
 
+// Shared ORDER BY used in both leaderboard and search queries
+const SQUAD_ORDER = "ORDER BY total_points DESC, level DESC, updated_at ASC";
+
+// Base SELECT that joins member count in one pass (eliminates N+1 subquery)
+const SQUAD_SELECT = `
+  SELECT
+    s.*,
+    ROW_NUMBER() OVER (${SQUAD_ORDER}) AS rank,
+    COUNT(csm.id) AS member_count
+  FROM coaching_squads s
+  LEFT JOIN coaching_squad_members csm
+    ON csm.squad_id = s.id AND csm.status = 'active'`;
+
+const SQUAD_GROUP = `GROUP BY s.id`;
+
 export async function getSquadLeaderboard({ limit = 50 } = {}) {
   const cap = Math.min(limit, 100);
   const { rows } = await query(
-    `SELECT
-       s.*,
-       ROW_NUMBER() OVER (
-         ORDER BY total_points DESC, level DESC, updated_at ASC
-       ) AS rank,
-       (SELECT COUNT(*) FROM coaching_squad_members
-        WHERE squad_id = s.id AND status = 'active') AS member_count
-     FROM coaching_squads s
-     ORDER BY total_points DESC, level DESC, updated_at ASC
+    `${SQUAD_SELECT}
+     ${SQUAD_GROUP}
+     ${SQUAD_ORDER}
      LIMIT $1`,
     [cap]
   );
@@ -117,16 +126,10 @@ export async function searchSquads({ query: q = "", limit = 20 } = {}) {
   const cap  = Math.min(limit, 50);
   const like = `%${q.toLowerCase()}%`;
   const { rows } = await query(
-    `SELECT
-       s.*,
-       ROW_NUMBER() OVER (
-         ORDER BY total_points DESC, level DESC, updated_at ASC
-       ) AS rank,
-       (SELECT COUNT(*) FROM coaching_squad_members
-        WHERE squad_id = s.id AND status = 'active') AS member_count
-     FROM coaching_squads s
+    `${SQUAD_SELECT}
      WHERE $1 = '' OR LOWER(s.name) LIKE $2 OR LOWER(COALESCE(s.tag,'')) LIKE $2
-     ORDER BY total_points DESC, level DESC, updated_at ASC
+     ${SQUAD_GROUP}
+     ${SQUAD_ORDER}
      LIMIT $3`,
     [q, like, cap]
   );

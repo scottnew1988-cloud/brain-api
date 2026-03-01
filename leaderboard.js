@@ -31,6 +31,14 @@ const ORDER_CLAUSE = `
  * @param {string} userId  — derived from JWT (req.userId); never trusted from client
  * @returns {Promise<Object>}
  */
+// Insert a zeroed coach_stats row if none exists yet (idempotent)
+async function ensureCoachStats(userId) {
+  await query(
+    `INSERT INTO coach_stats (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`,
+    [userId]
+  );
+}
+
 export async function getGlobalLeaderboard(userId) {
   // Single query: rank all coaches, then select top 100 + the user's row
   const { rows } = await query(
@@ -54,11 +62,7 @@ export async function getGlobalLeaderboard(userId) {
 
   if (!rows.length) {
     // No coaches on the board yet — upsert a zeroed entry for this user
-    await query(
-      `INSERT INTO coach_stats (user_id) VALUES ($1)
-       ON CONFLICT (user_id) DO NOTHING`,
-      [userId]
-    );
+    await ensureCoachStats(userId);
     return {
       leaderboard:   [],
       my_entry:      { rank: 1, user_id: userId, display_name: null, completions_count: 0, best_days_to_premier: null, avg_days_to_premier: null },
@@ -72,11 +76,7 @@ export async function getGlobalLeaderboard(userId) {
   let myEntry = rows.find((r) => r.user_id === userId);
   if (!myEntry && userId) {
     // User not yet on the board — show them at rank total+1 with zeros
-    await query(
-      `INSERT INTO coach_stats (user_id) VALUES ($1)
-       ON CONFLICT (user_id) DO NOTHING`,
-      [userId]
-    );
+    await ensureCoachStats(userId);
     myEntry = { user_id: userId, display_name: null, completions_count: 0, best_days_to_premier: null, avg_days_to_premier: null, rank: totalCoaches + 1, updated_at: null };
   }
 

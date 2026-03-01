@@ -762,14 +762,17 @@ app.post("/api/players/:player_id/progress", requireHmac, async (req, res) => {
 
 /**
  * POST /api/players/:player_id/complete
- * Auth: JWT (admin/testing) OR HMAC (Base44 server function)
+ * Auth: JWT
  *
  * Manually trigger career completion (testing / admin override).
  * The sweep handles batch completions automatically.
- * user_id for the completion is read from the player row in the DB.
+ * Ownership enforced: the requesting coach must own this player.
  */
 app.post("/api/players/:player_id/complete", requireJwt, async (req, res) => {
   try {
+    const player = await getPlayer(req.params.player_id);
+    if (!player) return res.status(404).json({ error: "Player not found" });
+    if (player.user_id !== req.userId) return res.status(403).json({ error: "Forbidden" });
     const result = await completePlayerCareer(req.params.player_id);
     res.json({ ok: true, ...result });
   } catch (err) {
@@ -997,11 +1000,18 @@ app.get("/api/squads/:squad_id/requests", requireJwt, async (req, res) => {
   }
 });
 
+const VALID_FACILITY_TYPES = ["training_equipment", "spa", "analysis_room", "medical_center"];
+const VALID_SQUAD_ROLES    = ["co_leader", "member"];
+const VALID_REQUEST_ACTIONS = ["approve", "reject"];
+
 /**
  * POST /api/squads/requests/:request_id/resolve — Auth: JWT
  * Body: { action: "approve" | "reject" }
  */
 app.post("/api/squads/requests/:request_id/resolve", requireJwt, async (req, res) => {
+  if (!VALID_REQUEST_ACTIONS.includes(req.body.action)) {
+    return res.status(400).json({ error: `action must be one of: ${VALID_REQUEST_ACTIONS.join(", ")}` });
+  }
   try {
     const result = await resolveSquadJoinRequest(
       req.params.request_id,
@@ -1029,6 +1039,9 @@ app.post("/api/squads/leave", requireJwt, async (req, res) => {
  * Body: { facility_type }
  */
 app.post("/api/squads/:squad_id/upgrade", requireJwt, async (req, res) => {
+  if (!VALID_FACILITY_TYPES.includes(req.body.facility_type)) {
+    return res.status(400).json({ error: `facility_type must be one of: ${VALID_FACILITY_TYPES.join(", ")}` });
+  }
   try {
     const result = await upgradeSquadFacility(
       req.userId,
@@ -1046,6 +1059,12 @@ app.post("/api/squads/:squad_id/upgrade", requireJwt, async (req, res) => {
  * Body: { target_user_id, role: "co_leader" | "member" }
  */
 app.post("/api/squads/:squad_id/set-role", requireJwt, async (req, res) => {
+  if (!req.body.target_user_id || typeof req.body.target_user_id !== "string") {
+    return res.status(400).json({ error: "target_user_id is required" });
+  }
+  if (!VALID_SQUAD_ROLES.includes(req.body.role)) {
+    return res.status(400).json({ error: `role must be one of: ${VALID_SQUAD_ROLES.join(", ")}` });
+  }
   try {
     const result = await setMemberRole(
       req.userId,
