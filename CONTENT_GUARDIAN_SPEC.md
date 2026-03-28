@@ -1,6 +1,6 @@
 # AI Content Guardian — Android App Specification
 
-**Version:** 2.0
+**Version:** 2.1
 **Platform:** Android only
 **Status:** Draft
 **Last Updated:** 2026-03-28
@@ -27,16 +27,16 @@ No server. No internet required for core logic.
 │  CaptureManager  (MediaProjection API)               │
 │       │  bitmap                                      │
 │       ▼                                              │
-│  InferenceModule                                     │
-│    ├─ VisualAnalyser   (TFLite — layout heuristics)  │
-│    ├─ ImageClassifier  (TFLite — MobileNetV3 quant.) │
-│    └─ TextExtractor    (ML Kit OCR → token scorer)   │
+│  InferenceModule                                             │
+│    ├─ MemorySimilarityScorer  (pHash lookup + px heuristics) │
+│    ├─ ImageClassifier         (TFLite — MobileNetV3 quant.)  │
+│    └─ TextExtractor           (ML Kit OCR → token scorer)    │
 │       │  scores                                      │
 │       ▼                                              │
 │  DecisionEngine  (weighted score + local rules)      │
 │       │  blur regions / pass                         │
 │       ▼                                              │
-│  BlurRenderer    (Canvas overlay, RenderScript)      │
+│  BlurRenderer    (Canvas overlay, RenderEffect / sw fallback) │
 │       │                                              │
 │       ▼  result shown to user                        │
 │  FeedbackSheet   (thumbs up / down + optional label) │
@@ -62,12 +62,12 @@ No server. No internet required for core logic.
         │  MediaProjection virtualDisplay → Bitmap (compressed to 720p)
         │
 3.  InferenceModule.analyse(bitmap) — runs in parallel:
-        ├─ VisualAnalyser.score(bitmap)      → visualScore  [0.0–1.0]
-        ├─ ImageClassifier.score(bitmap)     → imageScore   [0.0–1.0]
-        └─ TextExtractor.extractAndScore()   → textScore    [0.0–1.0]
+        ├─ MemorySimilarityScorer.score(bitmap) → memoryScore  [0.0–1.0]
+        ├─ ImageClassifier.score(bitmap)        → imageScore   [0.0–1.0]
+        └─ TextExtractor.extractAndScore()      → textScore    [0.0–1.0]
         │
-4.  DecisionEngine.decide(visualScore, imageScore, textScore)
-        │  combined = (visual * 0.5) + (image * 0.3) + (text * 0.2)
+4.  DecisionEngine.decide(memoryScore, imageScore, textScore)
+        │  combined = (memory * 0.5) + (image * 0.3) + (text * 0.2)
         │
 5a. combined >= THRESHOLD (default 0.65)
         │  → DecisionEngine.getRegions() returns List<Rect>
@@ -82,9 +82,9 @@ No server. No internet required for core logic.
 6.  User taps thumbs up / down on FeedbackSheet
         │
 7.  LocalLearner.record(bitmap, regions, feedback)
-        │  → pHash of bitmap stored
+        │  → pHash of bitmap stored with label
         │  → text tokens updated in frequency table
-        │  → threshold nudged ±0.02 per feedback signal
+        │  → per-app threshold adjusted ±0.02 (see Section C — Threshold)
 ```
 
 **Target total latency (tap → blur visible): ≤ 800ms on mid-range device.**
@@ -96,21 +96,33 @@ No server. No internet required for core logic.
 ### Formula
 
 ```
-combinedScore = (visualScore * 0.5) + (imageScore * 0.3) + (textScore * 0.2)
+combinedScore = (memoryScore * 0.5) + (imageScore * 0.3) + (textScore * 0.2)
 ```
 
-### VisualAnalyser (weight 0.5)
+### MemorySimilarityScorer (weight 0.5)
 
-Rule-based heuristics applied to the bitmap without a model:
+This is a **memory and retrieval signal**, not a second classifier. It answers:
+"Have we seen something like this before, and did the user mark it harmful?"
+
+Two sub-signals, averaged:
+
+**1. pHash similarity** — query Room DB for stored hashes within Hamming distance ≤ 8.
+If match found: sub-score = `1.0 - (hammingDistance / 64.0)`.
+If no match found: sub-score = 0.0.
+
+**2. Pixel heuristics** — lightweight rule-based signal applied to the bitmap:
 
 | Signal | Score contribution |
 |---|---|
 | Skin-tone pixel ratio > 40% of frame | +0.4 |
-| High-contrast region with face-shaped contour | +0.3 |
-| Large central region with no UI chrome | +0.2 |
-| Dominant red/pink saturation cluster | +0.1 |
+| High-contrast central region, no UI chrome | +0.3 |
+| Dominant red/pink saturation cluster | +0.2 |
+| Low text density (< 5% of pixels are text-like) | +0.1 |
 
-Output clamped to [0.0, 1.0].
+Final `memoryScore = (pHashSubScore + heuristicSubScore) / 2`, clamped to [0.0, 1.0].
+
+This component is named `memory` because as the user flags more content,
+pHash matches dominate and the heuristics become less influential.
 
 ### ImageClassifier (weight 0.3)
 
@@ -129,13 +141,30 @@ Output clamped to [0.0, 1.0].
 
 ### Threshold
 
-| Level | Value | Behaviour |
-|---|---|---|
-| Default | 0.65 | Blur triggered |
-| Nudged up | +0.02 per false-positive feedback | Less sensitive |
-| Nudged down | -0.02 per false-negative feedback | More sensitive |
-| Hard floor | 0.40 | Never drops below |
-| Hard ceiling | 0.90 | Never rises above |
+**Baseline:** 0.65 (global). Stored in `SharedPreferences`.
+
+**Two separate thresholds:**
+
+| Scope | Key | Default | Bounds |
+|---|---|---|---|
+| Global | `threshold_global` | 0.65 | [0.55, 0.75] |
+| Per-app | `threshold_<packageName>` | inherits global | [0.50, 0.80] |
+
+Per-app threshold is created on first feedback for that app's package name.
+Subsequent taps on the same app use the per-app value; unknown apps use global.
+
+**Adjustment rules:**
+
+- Thumbs-down on a miss (false negative): threshold -= 0.02 for that app
+- Thumbs-up on a correct blur (true positive): no change — reinforce, not lower
+- Long-press FAB and report false positive: threshold += 0.02 for that app
+- Minimum 3 feedback signals before a per-app threshold is persisted
+- Maximum ±0.10 total drift from global baseline before user is prompted to review sensitivity
+
+**Decay:**
+
+- Each threshold decays 0.005 toward global baseline per 7 days of inactivity on that app
+- Prevents stale per-app thresholds from persisting indefinitely after usage changes
 
 ---
 
@@ -176,19 +205,31 @@ fun hammingDistance(a: Long, b: Long): Int = (a xor b).countOneBits()
 ### Region-Based Blur
 
 1. DecisionEngine returns `List<Rect>` — one rect per detected harmful region
-2. BlurRenderer applies Gaussian blur (radius 25) to each rect using RenderScript (API 21+) or fallback `Stack Blur` implementation
-3. Blurred regions are drawn onto a transparent overlay `View` anchored to the window via `WindowManager`
+2. BlurRenderer applies blur to each rect using the appropriate API for the device:
+
+| API level | Method | Notes |
+|---|---|---|
+| API 31+ (Android 12+) | `RenderEffect.createBlurEffect(25f, 25f, SHADER_TILE_MODE_CLAMP)` applied to a `View` via `setRenderEffect()` | Hardware-accelerated; preferred path |
+| API 26–30 | Software `StackBlur` (pure Kotlin, radius 20, iterative) | Slower; run on background thread, post result to main |
+| API < 26 | Solid semi-transparent dark scrim (`#CC000000`) over region rect | No blur — obscures content without GPU dependency |
+
+> **RenderScript is explicitly excluded.** It was deprecated in API 31 and removed from NDK toolchains. Do not use `ScriptIntrinsicBlur` or any `android.renderscript.*` API.
+
+3. Blurred/obscured regions are drawn onto a transparent overlay `View` anchored to the window via `WindowManager`
 4. Original app content is untouched — overlay sits above it
 
 ### Fallback Rules
 
-If InferenceModule throws or times out (> 1000ms):
+Applied in order if InferenceModule throws or times out (> 1000ms):
 
-| Fallback level | Trigger | Action |
+| Level | Trigger | Action |
 |---|---|---|
-| L1 | ImageClassifier fails | Use VisualAnalyser + TextExtractor scores only (reweight 0.7 / 0.3) |
-| L2 | All classifiers fail | Blur centre 60% of screen |
-| L3 | Bitmap capture fails | Show toast "Could not analyse screen" — no blur |
+| L1 — score degraded | `ImageClassifier` fails or times out | Reweight remaining scores: `(memory * 0.7) + (text * 0.3)`; continue to decision |
+| L2 — region mapping uncertain | Combined score ≥ threshold but `getRegions()` returns empty list | Identify dominant content panel (largest non-chrome `View` rect); apply blur to that rect only |
+| L3 — all classifiers fail | All three scorers throw or return null | Full-screen dim overlay (`#99000000`) + non-blocking sheet: "Content uncertain — tap to dismiss" |
+| L4 — bitmap capture fails | `createVirtualDisplay` returns null or OOM on downsample retry | No overlay; show snackbar "Could not read screen" — silent, no crash |
+
+Levels are tried in sequence. L3 and L4 never co-occur; capture failure triggers L4 directly.
 
 ### Overlay Dismissal
 
@@ -200,45 +241,85 @@ If InferenceModule throws or times out (> 1000ms):
 
 ## F. Permissions
 
-| Permission | When requested | Required for |
-|---|---|---|
-| `SYSTEM_ALERT_WINDOW` | First launch — direct user to Settings | Floating overlay button |
-| `FOREGROUND_SERVICE` | Manifest (no runtime prompt) | OverlayService persistence |
-| `FOREGROUND_SERVICE_MEDIA_PROJECTION` | Manifest (Android 14+) | Service type declaration |
-| MediaProjection consent | On first tap (system dialog) | Screen capture |
-| `RECEIVE_BOOT_COMPLETED` | Manifest | Optional: restart service on reboot |
-| Accessibility Service | Optional — Settings prompt | Reading app context (not required for v1) |
+### Core tap-to-scan flow — required permissions
 
-**No camera permission. No microphone. No contacts. No location.**
+| Permission | Declared in | User action required | Purpose |
+|---|---|---|---|
+| `SYSTEM_ALERT_WINDOW` | `AndroidManifest.xml` | Must grant via Settings > Special app access | Floating overlay button |
+| `FOREGROUND_SERVICE` | `AndroidManifest.xml` | No runtime prompt | Keeps OverlayService alive |
+| `FOREGROUND_SERVICE_MEDIA_PROJECTION` | `AndroidManifest.xml` (API 34+ required) | No runtime prompt | Declares foreground service type for projection |
+| MediaProjection consent | OS system dialog | Shown on first tap; one-time per session | Screen capture |
 
-MediaProjection consent dialog is shown by Android OS — cannot be bypassed or pre-granted.
+**No camera. No microphone. No contacts. No location.**
+
+### Accessibility Service — explicitly optional
+
+The core tap-to-scan loop **does not require** Accessibility Service.
+Accessibility is not declared in the default manifest.
+It may be added in a future version to provide app-context signals (current foreground package name).
+If offered to users, it must be presented as an opt-in enhancement with a clear description of exactly what it reads — never as a requirement to use the app.
+
+### Overlay behaviour caveats
+
+- `SYSTEM_ALERT_WINDOW` is a sensitive permission requiring a Settings deep-link redirect; it cannot be granted via `requestPermissions()`.
+- Android 12+ allows apps to set `HIDE_OVERLAY_WINDOWS` in their manifest, which hides overlays from third-party apps. This means the Guardian FAB may not appear over apps that set this flag. Document as a known limitation in onboarding.
+- The OS MediaProjection consent dialog cannot be bypassed, pre-granted, or re-used across reboots. A new consent is required after device restart.
 
 ---
 
 ## G. Runtime Lifecycle
 
+### Manifest declarations required
+
+```xml
+<!-- AndroidManifest.xml -->
+<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+<!-- Required on API 34+ for MediaProjection foreground service type -->
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+<service
+    android:name=".overlay.OverlayService"
+    android:foregroundServiceType="mediaProjection"
+    android:exported="false" />
+```
+
+### Lifecycle flow
+
 ```
 App installed
     │
     ▼
-MainActivity launched → requests SYSTEM_ALERT_WINDOW
-    │
-    ▼
-User grants → startForegroundService(OverlayService)
+MainActivity launched
+    ├─ Check Settings.canDrawOverlays() → if false: show onboarding + deep-link to Settings
+    └─ if true: startForegroundService(Intent(this, OverlayService::class.java))
     │
     ▼
 OverlayService.onCreate()
-    ├─ WindowManager.addView(FAB overlay)
-    ├─ CaptureManager.init() — does NOT start projection yet
-    └─ LocalLearner.load() — load pHash + token tables from Room
+    ├─ startForeground(NOTIFICATION_ID, buildNotification())
+    │     Notification: "Content Guardian active" + "Stop" action
+    │     Must be called within 5 seconds of service start (ANR risk if delayed)
+    │     On API 34+: startForeground() must specify type FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+    ├─ WindowManager.addView(fabView, overlayLayoutParams)
+    ├─ CaptureManager.init() — projection NOT started here
+    └─ LocalLearner.load() — Room query on IO dispatcher
     │
     ▼
-Service runs in foreground (persistent notification: "Content Guardian active")
+Service runs in foreground — FAB visible, no capture active
     │
     ▼
 User taps FAB
-    ├─ First tap: show MediaProjection consent dialog
-    └─ Subsequent taps: reuse existing projection token
+    ├─ First tap in session:
+    │     startActivityForResult(mediaProjectionManager.createScreenCaptureIntent(), RC_PROJECTION)
+    │     → OS shows system consent dialog
+    │     → onActivityResult: if resultCode == RESULT_OK, store projection token
+    │     → CaptureManager.start(token) — creates VirtualDisplay
+    └─ Subsequent taps in same session: CaptureManager.capture() using existing VirtualDisplay
+    │
+    ▼
+    Projection scope: per-session (token held until service stops or user revokes)
+    VirtualDisplay is created once per session, not once per tap
+    A new consent is required after device reboot
     │
     ▼
 Detection pipeline runs (see Section B)
@@ -247,12 +328,13 @@ Detection pipeline runs (see Section B)
 User dismisses overlay / provides feedback
     │
     ▼
-OverlayService returns to idle — FAB visible, no overlay
+OverlayService returns to idle — FAB visible, VirtualDisplay held open
     │
     ▼
-User swipes away app from recents
-    ├─ OverlayService.onTaskRemoved() → stopSelf() or persist based on user setting
-    └─ Default: persist (user controls via notification action "Stop Guardian")
+User stops Guardian (notification action or Settings toggle)
+    ├─ CaptureManager.stop() — release VirtualDisplay + projection token
+    ├─ WindowManager.removeView(fabView)
+    └─ stopSelf()
 ```
 
 ---
@@ -317,14 +399,14 @@ app/
 │   │   ├── capture/
 │   │   │   └── CaptureManager.kt          # MediaProjection wrapper
 │   │   ├── inference/
-│   │   │   ├── InferenceModule.kt         # Orchestrates all classifiers
-│   │   │   ├── VisualAnalyser.kt          # Heuristic pixel analysis
-│   │   │   ├── ImageClassifier.kt         # TFLite MobileNetV3
-│   │   │   └── TextExtractor.kt           # ML Kit OCR + token scoring
+│   │   │   ├── InferenceModule.kt             # Orchestrates all scorers
+│   │   │   ├── MemorySimilarityScorer.kt      # pHash lookup + pixel heuristics
+│   │   │   ├── ImageClassifier.kt             # TFLite MobileNetV3
+│   │   │   └── TextExtractor.kt               # ML Kit OCR + token scoring
 │   │   ├── decision/
 │   │   │   └── DecisionEngine.kt          # Weighted score + threshold
 │   │   ├── blur/
-│   │   │   └── BlurRenderer.kt            # RenderScript / stack blur
+│   │   │   └── BlurRenderer.kt            # RenderEffect (API 31+) / StackBlur / scrim fallback
 │   │   ├── learning/
 │   │   │   ├── LocalLearner.kt            # pHash + token freq logic
 │   │   │   └── PHashUtils.kt              # 64-bit pHash computation
