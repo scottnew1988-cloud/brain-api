@@ -210,7 +210,7 @@ fun hammingDistance(a: Long, b: Long): Int = (a xor b).countOneBits()
 | API level | Method | Notes |
 |---|---|---|
 | API 31+ (Android 12+) | `RenderEffect.createBlurEffect(25f, 25f, SHADER_TILE_MODE_CLAMP)` applied to a `View` via `setRenderEffect()` | Hardware-accelerated; preferred path |
-| API 26–30 | Software `StackBlur` (pure Kotlin, radius 20, iterative) | Slower; run on background thread, post result to main |
+| API 26–30 | Software `StackBlur` (pure Kotlin, radius 20, iterative) | Downscale captured frame to 360p before blur; run on background thread, post result to main; if blur exceeds 300ms measured wall-clock, abort and fall back to scrim (API < 26 path) for this tap |
 | API < 26 | Solid semi-transparent dark scrim (`#CC000000`) over region rect | No blur — obscures content without GPU dependency |
 
 > **RenderScript is explicitly excluded.** It was deprecated in API 31 and removed from NDK toolchains. Do not use `ScriptIntrinsicBlur` or any `android.renderscript.*` API.
@@ -313,13 +313,20 @@ User taps FAB
     │     startActivityForResult(mediaProjectionManager.createScreenCaptureIntent(), RC_PROJECTION)
     │     → OS shows system consent dialog
     │     → onActivityResult: if resultCode == RESULT_OK, store projection token
-    │     → CaptureManager.start(token) — creates VirtualDisplay
-    └─ Subsequent taps in same session: CaptureManager.capture() using existing VirtualDisplay
+    │     → CaptureManager.startSession(token)
+    │           Creates exactly ONE VirtualDisplay from this token
+    │           Do NOT call createVirtualDisplay() again on the same token
+    └─ Subsequent taps in same active session:
+          CaptureManager.capture() — reads a new frame from the existing VirtualDisplay
+          No new consent. No new VirtualDisplay. Same Surface, same ImageReader.
     │
     ▼
-    Projection scope: per-session (token held until service stops or user revokes)
-    VirtualDisplay is created once per session, not once per tap
-    A new consent is required after device reboot
+    ── Session contract ──────────────────────────────────────────────
+    One session = one user consent + one createVirtualDisplay() call.
+    The VirtualDisplay is held open across taps to avoid re-consent overhead.
+    It must NOT be re-created per tap — doing so leaks Surface resources
+    and will trigger SecurityException on reuse of a spent token.
+    ──────────────────────────────────────────────────────────────────
     │
     ▼
 Detection pipeline runs (see Section B)
@@ -328,11 +335,26 @@ Detection pipeline runs (see Section B)
 User dismisses overlay / provides feedback
     │
     ▼
-OverlayService returns to idle — FAB visible, VirtualDisplay held open
+OverlayService returns to idle — FAB visible, session still active
     │
     ▼
-User stops Guardian (notification action or Settings toggle)
-    ├─ CaptureManager.stop() — release VirtualDisplay + projection token
+Session ends on any of:
+    ├─ User taps "Stop Guardian" (notification action)
+    ├─ OverlayService.onDestroy() called by OS
+    └─ CaptureManager detects invalid projection (SecurityException on capture)
+    │
+    In all cases CaptureManager.stopSession() must:
+    ├─ virtualDisplay.release()         ← releases Surface + decoder resources
+    ├─ imageReader.close()              ← frees frame buffers
+    ├─ mediaProjection.stop()           ← invalidates token
+    └─ set all references to null       ← prevent use-after-release
+    │
+    A stopped or invalid projection CANNOT be resumed.
+    The next session requires fresh user consent via createScreenCaptureIntent().
+    A new consent is also required after device reboot — projection tokens
+    do not survive across reboots.
+    │
+    ▼
     ├─ WindowManager.removeView(fabView)
     └─ stopSelf()
 ```
