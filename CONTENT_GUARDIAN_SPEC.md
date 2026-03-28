@@ -1,330 +1,349 @@
-# AI Content Guardian — Product Specification
+# AI Content Guardian — Android App Specification
 
-**Version:** 1.0
+**Version:** 2.0
+**Platform:** Android only
 **Status:** Draft
 **Last Updated:** 2026-03-28
-**Repo:** scottnew1988-cloud/brain-api
 
 ---
 
-## 1. Overview
+## What It Does
 
-AI Content Guardian is a moderation and safety layer built into the Brain API platform. It intercepts all inbound user messages and outbound AI responses, classifying content in real time and enforcing configurable policies — blocking, flagging, or rewriting content before it reaches the player or the AI model.
-
-The system is designed to be **transparent in safe cases** (zero latency impact for clean content) and **decisive in harmful cases** (block or sanitise before delivery).
+User installs the app. A floating button appears over every other app.
+While on TikTok / Instagram / X, user taps the button.
+App captures the current screen, runs on-device detection, and blurs harmful regions.
+User gives a thumbs up/down. App learns locally from that feedback.
+No server. No internet required for core logic.
 
 ---
 
-## 2. Problem Statement
+## A. Architecture
 
-The Brain API exposes an AI agent chat endpoint (`POST /api/agent/chat`) that accepts free-text input from players. As the user base scales, several risks emerge:
+```
+┌─────────────────────────────────────────────────────┐
+│  OverlayService  (foreground service, always-on FAB) │
+│       │                                              │
+│       ▼  on tap                                      │
+│  CaptureManager  (MediaProjection API)               │
+│       │  bitmap                                      │
+│       ▼                                              │
+│  InferenceModule                                     │
+│    ├─ VisualAnalyser   (TFLite — layout heuristics)  │
+│    ├─ ImageClassifier  (TFLite — MobileNetV3 quant.) │
+│    └─ TextExtractor    (ML Kit OCR → token scorer)   │
+│       │  scores                                      │
+│       ▼                                              │
+│  DecisionEngine  (weighted score + local rules)      │
+│       │  blur regions / pass                         │
+│       ▼                                              │
+│  BlurRenderer    (Canvas overlay, RenderScript)      │
+│       │                                              │
+│       ▼  result shown to user                        │
+│  FeedbackSheet   (thumbs up / down + optional label) │
+│       │  signal                                      │
+│       ▼                                              │
+│  LocalLearner    (pHash store + token freq table)    │
+│       │  persists to                                 │
+│       ▼                                              │
+│  LocalStorage    (Room DB + SharedPreferences)       │
+└─────────────────────────────────────────────────────┘
+```
 
-| Risk | Example |
+**All components are in-process. No IPC. No network calls on the detection path.**
+
+---
+
+## B. Detection Pipeline — Tap to Blur
+
+```
+1.  User taps FAB
+        │
+2.  OverlayService calls CaptureManager.capture()
+        │  MediaProjection virtualDisplay → Bitmap (compressed to 720p)
+        │
+3.  InferenceModule.analyse(bitmap) — runs in parallel:
+        ├─ VisualAnalyser.score(bitmap)      → visualScore  [0.0–1.0]
+        ├─ ImageClassifier.score(bitmap)     → imageScore   [0.0–1.0]
+        └─ TextExtractor.extractAndScore()   → textScore    [0.0–1.0]
+        │
+4.  DecisionEngine.decide(visualScore, imageScore, textScore)
+        │  combined = (visual * 0.5) + (image * 0.3) + (text * 0.2)
+        │
+5a. combined >= THRESHOLD (default 0.65)
+        │  → DecisionEngine.getRegions() returns List<Rect>
+        │  → BlurRenderer.apply(bitmap, regions)
+        │  → OverlayService renders blurred overlay on screen
+        │  → FeedbackSheet shown (non-blocking bottom sheet)
+        │
+5b. combined < THRESHOLD
+        │  → no overlay drawn
+        │  → silent pass (optionally log for debugging)
+        │
+6.  User taps thumbs up / down on FeedbackSheet
+        │
+7.  LocalLearner.record(bitmap, regions, feedback)
+        │  → pHash of bitmap stored
+        │  → text tokens updated in frequency table
+        │  → threshold nudged ±0.02 per feedback signal
+```
+
+**Target total latency (tap → blur visible): ≤ 800ms on mid-range device.**
+
+---
+
+## C. Scoring Logic
+
+### Formula
+
+```
+combinedScore = (visualScore * 0.5) + (imageScore * 0.3) + (textScore * 0.2)
+```
+
+### VisualAnalyser (weight 0.5)
+
+Rule-based heuristics applied to the bitmap without a model:
+
+| Signal | Score contribution |
 |---|---|
-| Prompt injection | Player sends instructions to override the agent's persona |
-| Abusive / toxic content | Slurs, threats, harassment directed at the agent or other users |
-| Personal data leakage | Player accidentally sends PII (email, card number) |
-| Age-inappropriate content | Explicit language in a game environment targeted at minors |
-| Spam / bot flooding | High-frequency identical or near-identical messages |
+| Skin-tone pixel ratio > 40% of frame | +0.4 |
+| High-contrast region with face-shaped contour | +0.3 |
+| Large central region with no UI chrome | +0.2 |
+| Dominant red/pink saturation cluster | +0.1 |
 
-Without a guardian layer, these risks are handled ad-hoc (or not at all) inside individual response builders — creating fragile, inconsistent behaviour.
+Output clamped to [0.0, 1.0].
+
+### ImageClassifier (weight 0.3)
+
+- Model: MobileNetV3-Small, quantised INT8, NSFW binary classifier
+- Input: 224×224 crop of the most prominent region
+- Output: float [0.0–1.0] (0 = safe, 1 = harmful)
+- Model file: `assets/nsfw_v1.tflite` (~4MB)
+- Inference time target: ≤ 150ms
+
+### TextExtractor (weight 0.2)
+
+- OCR: ML Kit Text Recognition (on-device, no network)
+- Tokenise extracted text → compare against local `BlocklistTokens` table
+- Score = `matchedTokens / max(totalTokens, 1)`, clamped to [0.0, 1.0]
+- Blocklist bootstrapped from a hardcoded seed list; updated by LocalLearner
+
+### Threshold
+
+| Level | Value | Behaviour |
+|---|---|---|
+| Default | 0.65 | Blur triggered |
+| Nudged up | +0.02 per false-positive feedback | Less sensitive |
+| Nudged down | -0.02 per false-negative feedback | More sensitive |
+| Hard floor | 0.40 | Never drops below |
+| Hard ceiling | 0.90 | Never rises above |
 
 ---
 
-## 3. Goals
+## D. Local Learning
 
-- **Protect players** from receiving harmful or inappropriate AI-generated content.
-- **Protect the platform** from prompt injection, data exfiltration, and abuse.
-- **Give operators control** via a configurable policy engine — no hard-coded rules.
-- **Maintain response quality** — the guardian must not degrade legitimate replies.
-- **Be auditable** — every moderation decision is logged with reason codes.
+**No model training. No gradient descent. No server sync.**
+
+### pHash Store
+
+- On each capture, compute perceptual hash (pHash) of the full bitmap
+- Store in `Room` table: `{ hash TEXT, label INT, timestamp INTEGER }`
+- On future captures: compute pHash → query for nearest stored hash (Hamming distance ≤ 8)
+- If match found: boost or suppress combined score by ±0.15 before threshold check
+
+```kotlin
+// Hamming distance between two 64-bit pHashes
+fun hammingDistance(a: Long, b: Long): Int = (a xor b).countOneBits()
+// Match threshold: distance <= 8 (out of 64 bits)
+```
+
+### Token Frequency Table
+
+- After each thumbs-down feedback: extract OCR tokens from flagged screen → increment `harmful_count`
+- After each thumbs-up feedback: decrement `harmful_count` for matched tokens (floor 0)
+- TextExtractor score uses `harmful_count / max_seen_count` as per-token weight
+- Table capped at 2000 tokens (LRU eviction)
+
+### No Learning On
+
+- Blur regions (not stored)
+- Raw screenshots (never persisted)
+- Model weights (static)
 
 ---
 
-## 4. Non-Goals
+## E. Blur Logic
 
-- Full human moderation review queue (out of scope for v1; designed to accommodate in v2).
-- Image / media moderation (text only for v1).
-- Cross-platform content moderation outside of brain-api.
+### Region-Based Blur
+
+1. DecisionEngine returns `List<Rect>` — one rect per detected harmful region
+2. BlurRenderer applies Gaussian blur (radius 25) to each rect using RenderScript (API 21+) or fallback `Stack Blur` implementation
+3. Blurred regions are drawn onto a transparent overlay `View` anchored to the window via `WindowManager`
+4. Original app content is untouched — overlay sits above it
+
+### Fallback Rules
+
+If InferenceModule throws or times out (> 1000ms):
+
+| Fallback level | Trigger | Action |
+|---|---|---|
+| L1 | ImageClassifier fails | Use VisualAnalyser + TextExtractor scores only (reweight 0.7 / 0.3) |
+| L2 | All classifiers fail | Blur centre 60% of screen |
+| L3 | Bitmap capture fails | Show toast "Could not analyse screen" — no blur |
+
+### Overlay Dismissal
+
+- Tap anywhere on blurred overlay → dismiss overlay (not the app underneath)
+- Auto-dismiss after 8 seconds if no interaction
+- FAB returns to idle state after dismissal
 
 ---
 
-## 5. Architecture
+## F. Permissions
+
+| Permission | When requested | Required for |
+|---|---|---|
+| `SYSTEM_ALERT_WINDOW` | First launch — direct user to Settings | Floating overlay button |
+| `FOREGROUND_SERVICE` | Manifest (no runtime prompt) | OverlayService persistence |
+| `FOREGROUND_SERVICE_MEDIA_PROJECTION` | Manifest (Android 14+) | Service type declaration |
+| MediaProjection consent | On first tap (system dialog) | Screen capture |
+| `RECEIVE_BOOT_COMPLETED` | Manifest | Optional: restart service on reboot |
+| Accessibility Service | Optional — Settings prompt | Reading app context (not required for v1) |
+
+**No camera permission. No microphone. No contacts. No location.**
+
+MediaProjection consent dialog is shown by Android OS — cannot be bypassed or pre-granted.
+
+---
+
+## G. Runtime Lifecycle
 
 ```
-Player
-  │
-  ▼
-[Inbound Guardian]  ◄─── Policy Engine
-  │  classify + enforce
-  ▼
-[AI Agent Router]   (existing /api/agent/chat logic)
-  │
-  ▼
-[Outbound Guardian] ◄─── Policy Engine
-  │  classify + enforce
-  ▼
-Player (response delivered)
-  │
-  ▼
-[Audit Log]
+App installed
+    │
+    ▼
+MainActivity launched → requests SYSTEM_ALERT_WINDOW
+    │
+    ▼
+User grants → startForegroundService(OverlayService)
+    │
+    ▼
+OverlayService.onCreate()
+    ├─ WindowManager.addView(FAB overlay)
+    ├─ CaptureManager.init() — does NOT start projection yet
+    └─ LocalLearner.load() — load pHash + token tables from Room
+    │
+    ▼
+Service runs in foreground (persistent notification: "Content Guardian active")
+    │
+    ▼
+User taps FAB
+    ├─ First tap: show MediaProjection consent dialog
+    └─ Subsequent taps: reuse existing projection token
+    │
+    ▼
+Detection pipeline runs (see Section B)
+    │
+    ▼
+User dismisses overlay / provides feedback
+    │
+    ▼
+OverlayService returns to idle — FAB visible, no overlay
+    │
+    ▼
+User swipes away app from recents
+    ├─ OverlayService.onTaskRemoved() → stopSelf() or persist based on user setting
+    └─ Default: persist (user controls via notification action "Stop Guardian")
 ```
-
-The guardian runs as **Express middleware**, wrapping the existing agent endpoint. No changes are required to the response builders.
 
 ---
 
-## 6. Content Classification
+## H. Failure Handling
 
-### 6.1 Categories
+| Failure | Detection | Response |
+|---|---|---|
+| `SYSTEM_ALERT_WINDOW` denied | `Settings.canDrawOverlays()` returns false | Show in-app explanation screen; cannot start service |
+| MediaProjection consent denied | `onActivityResult` with null intent | Toast "Screen capture permission needed"; retry on next tap |
+| MediaProjection token expired | `SecurityException` on `createVirtualDisplay` | Re-request consent silently on next tap |
+| TFLite model load failure | `IOException` in `Interpreter()` | Disable ImageClassifier; fallback L1 |
+| OCR timeout (> 500ms) | `Task.addOnFailureListener` timeout | textScore = 0.0; continue with other scores |
+| Out of memory on bitmap | `OutOfMemoryError` catch | Downsample to 480p and retry once; if fails → fallback L3 |
+| OverlayService killed by OS | `onDestroy()` | Restart via `START_STICKY`; FAB re-added |
+| Room DB corrupt | `IllegalStateException` | Delete and recreate DB; reset local learning state |
 
-| ID | Category | Description | Default Action |
+---
+
+## I. Performance Targets
+
+| Metric | Target | Measurement point |
+|---|---|---|
+| Tap to blur visible | ≤ 800ms | FAB tap → overlay drawn |
+| ImageClassifier inference | ≤ 150ms | `Interpreter.run()` duration |
+| OCR extraction | ≤ 300ms | ML Kit task completion |
+| VisualAnalyser | ≤ 50ms | Pixel analysis on bitmap |
+| pHash lookup (2000 rows) | ≤ 10ms | Room query |
+| Memory overhead (service idle) | ≤ 40MB | Android Profiler RSS |
+| Memory overhead (during inference) | ≤ 120MB | Peak during `analyse()` |
+| Battery (per tap) | < 50mJ | Estimated, validate on device |
+| TFLite model size | ≤ 5MB | APK assets |
+
+Target device: Snapdragon 665 / 4GB RAM (2022 mid-range baseline).
+
+---
+
+## J. Risks
+
+| Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| `SAFE` | Safe | No issues detected | Pass through |
-| `PROMPT_INJECTION` | Prompt injection | Attempts to override system prompt or agent persona | Block |
-| `TOXIC` | Toxic / abusive | Hate speech, slurs, threats, severe profanity | Block |
-| `MILD_PROFANITY` | Mild profanity | Casual swearing not directed at anyone | Warn / Pass |
-| `PII` | Personal data | Email, phone, card numbers, passwords | Redact + Warn |
-| `SPAM` | Spam / flood | Repeated identical messages, nonsense strings | Rate-limit |
-| `OFF_TOPIC_SEVERE` | Severely off-topic | Illegal activity, explicit adult content | Block |
-| `JAILBREAK` | Jailbreak attempt | "Ignore previous instructions", DAN-style prompts | Block |
+| Google Play policy: NSFW classifier in APK | High | App removed from Play Store | Distribute via sideload / alternative stores; review Play policy before submission |
+| MediaProjection API changes (Android 15+) | Medium | Capture breaks | Abstract behind `CaptureManager` interface; maintain API-level adapters |
+| OS killing foreground service on low memory | Medium | FAB disappears | `START_STICKY` + user notification to re-enable; document in onboarding |
+| False positives alienating users | High | Low retention | pHash learning + threshold nudging; expose sensitivity slider in Settings |
+| False negatives on novel content | Medium | Trust loss | Token frequency learning; clear "miss? tap to report" affordance |
+| `SYSTEM_ALERT_WINDOW` friction (Android 10+) | High | Low conversion | Onboarding flow with step-by-step Settings guide + deep link |
+| Accessibility service misuse concern | Low | User trust | Accessibility service is optional in v1; document exactly what it reads |
+| pHash collision producing wrong boost | Low | Wrong blur decision | Cap boost at ±0.15; hard threshold floor at 0.40 |
 
-### 6.2 Classifier Pipeline
+---
 
-Each message passes through the following classifiers in order. Processing stops at the first `Block` verdict.
+## File Structure (v1)
 
 ```
-1. Rate-limit check       → SPAM if threshold exceeded
-2. Length check           → SPAM if > MAX_MESSAGE_LENGTH chars
-3. PII detector           → regex patterns (email, phone, card)
-4. Injection detector     → keyword + pattern matching (rule-based)
-5. Toxicity classifier    → ML model (configurable: local or API)
-6. Off-topic classifier   → keyword list + similarity threshold
-```
-
-The classifier is **modular** — each stage is a standalone function with a consistent interface:
-
-```js
-// classifier interface
-async function classify(text, context) {
-  // returns: { category, confidence, matchedPatterns }
-}
-```
-
----
-
-## 7. Policy Engine
-
-Operators configure per-category actions via a policy object (stored in config or DB):
-
-```js
-const DEFAULT_POLICY = {
-  PROMPT_INJECTION:  { action: "block",   response: "guardian:injection_blocked" },
-  TOXIC:             { action: "block",   response: "guardian:toxic_blocked" },
-  MILD_PROFANITY:    { action: "pass",    log: true },
-  PII:               { action: "redact",  response: "guardian:pii_redacted" },
-  SPAM:              { action: "block",   response: "guardian:spam_blocked" },
-  OFF_TOPIC_SEVERE:  { action: "block",   response: "guardian:offtopic_blocked" },
-  JAILBREAK:         { action: "block",   response: "guardian:jailbreak_blocked" },
-  SAFE:              { action: "pass" },
-};
-```
-
-**Actions:**
-
-| Action | Behaviour |
-|---|---|
-| `pass` | Forward to agent unchanged |
-| `block` | Return a guardian-managed safe response; agent never sees message |
-| `redact` | Strip matched PII, forward sanitised message to agent |
-| `warn` | Tag response with a warning header; pass message through |
-
----
-
-## 8. API Changes
-
-### 8.1 Modified Endpoint
-
-`POST /api/agent/chat` — behaviour unchanged for safe content. For blocked content, the response shape is identical to current responses so no client changes are required:
-
-```json
-{
-  "reply": "I can only help with football career topics. What would you like to know about training, matches, or transfers?",
-  "suggested_actions": [...],
-  "conversation_id": "conv",
-  "intent": "blocked",
-  "metadata": {
-    "agent_name": "Football Brain",
-    "agent_role": "Career Advisor",
-    "guardian": {
-      "triggered": true,
-      "category": "PROMPT_INJECTION",
-      "action": "block"
-    }
-  }
-}
-```
-
-The `metadata.guardian` field is **always present** in responses:
-
-- Safe: `{ "triggered": false }`
-- Blocked/acted on: `{ "triggered": true, "category": "...", "action": "..." }`
-
-### 8.2 New Endpoints
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/guardian/health` | Guardian status, classifier versions |
-| `GET` | `/api/guardian/stats` | Moderation counts by category (last 24h) |
-| `GET` | `/api/guardian/policy` | Return current active policy |
-| `PUT` | `/api/guardian/policy` | Update policy (admin auth required) |
-| `GET` | `/api/guardian/audit` | Paginated audit log (admin auth required) |
-
----
-
-## 9. Audit Logging
-
-Every message processed by the guardian is logged:
-
-```js
-{
-  id: "uuid",
-  timestamp: "ISO8601",
-  conversation_id: "...",
-  player_id: "...",
-  direction: "inbound" | "outbound",
-  original_text_hash: "sha256(text)",  // hashed — no raw PII stored
-  category: "SAFE" | "TOXIC" | ...,
-  action: "pass" | "block" | "redact" | "warn",
-  confidence: 0.0 - 1.0,
-  matched_patterns: ["..."],
-  policy_version: "1.0"
-}
-```
-
-**Privacy:** Raw message text is never stored. Only the SHA-256 hash is logged, enabling correlation without retaining content.
-
----
-
-## 10. Rate Limiting
-
-The guardian enforces per-player message rate limits to prevent flooding:
-
-| Window | Limit | Action |
-|---|---|---|
-| 10 seconds | 5 messages | Soft warn |
-| 60 seconds | 20 messages | Block for 60s |
-| 10 minutes | 60 messages | Block for 10 min |
-
-Rate limit state is stored in-memory (development) or Redis (production). The existing `conversation_id` / `player_id` fields are used as the rate limit key.
-
----
-
-## 11. Guardian Responses (Canned Replies)
-
-Blocked messages return friendly, on-brand responses that fit the Football Brain persona. Each category has three engagement-tier variants (matching the existing `low` / `medium` / `high` system):
-
-**Example — `TOXIC` block, high engagement tier:**
-> "That kind of language isn't the way we operate here. Let's keep it professional — I'm here to get you to the top, but only if we're working together properly."
-
-**Example — `PROMPT_INJECTION` block (all tiers):**
-> "I'm your football agent, not a general assistant. Let's keep the focus on your career — what do you need help with?"
-
-**Example — `PII` redact warning:**
-> "I've removed some personal details from your message for your own security. Here's what I can help with..."
-
-Full canned response catalogue: see `src/guardian/responses.js` (to be created in implementation).
-
----
-
-## 12. Implementation Plan
-
-### Phase 1 — Core Infrastructure (Week 1)
-
-- [ ] `src/guardian/index.js` — middleware entry point
-- [ ] `src/guardian/classifiers/pii.js` — regex-based PII detection
-- [ ] `src/guardian/classifiers/injection.js` — prompt injection / jailbreak detection
-- [ ] `src/guardian/classifiers/rateLimit.js` — in-memory rate limiter
-- [ ] `src/guardian/policy.js` — policy loader and enforcer
-- [ ] `src/guardian/audit.js` — audit log writer
-- [ ] Wire middleware into `server.js`
-
-### Phase 2 — Toxicity & Responses (Week 2)
-
-- [ ] `src/guardian/classifiers/toxicity.js` — keyword list classifier (v1), Claude API classifier (v2)
-- [ ] `src/guardian/responses.js` — canned response catalogue with engagement-tier variants
-- [ ] `GET /api/guardian/health` and `GET /api/guardian/stats` endpoints
-
-### Phase 3 — Admin & Observability (Week 3)
-
-- [ ] `GET/PUT /api/guardian/policy` — runtime policy management
-- [ ] `GET /api/guardian/audit` — paginated audit log query
-- [ ] Admin auth middleware (API key header `X-Guardian-Admin-Key`)
-- [ ] Integration tests covering all 8 content categories
-
-### Phase 4 — ML Upgrade (Future)
-
-- [ ] Replace keyword toxicity classifier with Claude API (`claude-haiku-4-5`) call
-- [ ] Confidence thresholds configurable per category
-- [ ] Redis-backed rate limiting for multi-instance deployments
-
----
-
-## 13. Configuration
-
-All guardian settings are driven by environment variables, with safe defaults:
-
-```env
-# Guardian on/off (default: true)
-GUARDIAN_ENABLED=true
-
-# Max message length in characters (default: 2000)
-GUARDIAN_MAX_MESSAGE_LENGTH=2000
-
-# Rate limit: messages per 60s window (default: 20)
-GUARDIAN_RATE_LIMIT_PER_MIN=20
-
-# Admin API key for /api/guardian/policy and /api/guardian/audit
-GUARDIAN_ADMIN_KEY=change-me-in-production
-
-# Toxicity classifier: "keyword" (default) or "claude"
-GUARDIAN_TOXICITY_CLASSIFIER=keyword
-
-# Claude model for AI classifier (used when TOXICITY_CLASSIFIER=claude)
-GUARDIAN_CLAUDE_MODEL=claude-haiku-4-5-20251001
-
-# Log level: "none" | "blocked_only" | "all" (default: blocked_only)
-GUARDIAN_LOG_LEVEL=blocked_only
+app/
+├── src/main/
+│   ├── java/com/contentguardian/
+│   │   ├── overlay/
+│   │   │   ├── OverlayService.kt          # Foreground service + FAB
+│   │   │   └── FeedbackSheet.kt           # Bottom sheet UI
+│   │   ├── capture/
+│   │   │   └── CaptureManager.kt          # MediaProjection wrapper
+│   │   ├── inference/
+│   │   │   ├── InferenceModule.kt         # Orchestrates all classifiers
+│   │   │   ├── VisualAnalyser.kt          # Heuristic pixel analysis
+│   │   │   ├── ImageClassifier.kt         # TFLite MobileNetV3
+│   │   │   └── TextExtractor.kt           # ML Kit OCR + token scoring
+│   │   ├── decision/
+│   │   │   └── DecisionEngine.kt          # Weighted score + threshold
+│   │   ├── blur/
+│   │   │   └── BlurRenderer.kt            # RenderScript / stack blur
+│   │   ├── learning/
+│   │   │   ├── LocalLearner.kt            # pHash + token freq logic
+│   │   │   └── PHashUtils.kt              # 64-bit pHash computation
+│   │   ├── storage/
+│   │   │   ├── AppDatabase.kt             # Room DB definition
+│   │   │   ├── PHashDao.kt
+│   │   │   └── TokenDao.kt
+│   │   └── ui/
+│   │       └── MainActivity.kt            # Permission onboarding only
+│   └── assets/
+│       └── nsfw_v1.tflite                 # Quantised INT8 model (~4MB)
 ```
 
 ---
 
-## 14. Security Considerations
+## Open Questions (v1 scope)
 
-- Admin endpoints require `X-Guardian-Admin-Key` header. Key must be a minimum 32-character random string in production.
-- Audit logs hash message content — raw text is never persisted.
-- Policy updates are logged with a timestamp and requestor IP.
-- The guardian itself must not be bypassable via `Content-Type` tricks or chunked encoding — input normalisation happens before classification.
-- Classifier patterns should not be publicly exposed via the API (audit log shows `matched_patterns` only to admins).
-
----
-
-## 15. Testing Strategy
-
-| Test Type | Coverage Target |
-|---|---|
-| Unit — classifiers | Each classifier tested with ≥10 positive + ≥10 negative samples |
-| Unit — policy engine | All 4 actions (pass, block, redact, warn) verified |
-| Integration — middleware | Full request/response cycle for all 8 categories |
-| Integration — rate limiter | Burst threshold and window reset behaviour |
-| E2E — agent endpoint | Clean messages pass through unchanged; blocked messages return correct shape |
-
----
-
-## 16. Open Questions
-
-1. **Outbound moderation scope** — Should the guardian also scan AI-generated responses, or is inbound-only sufficient for v1?
-2. **Human review queue** — At what volume does a manual review queue become necessary? Define the threshold.
-3. **Toxicity ML model** — Is a Claude API call (with latency/cost) acceptable for v1, or do we start with keyword-only and upgrade in Phase 4?
-4. **Multi-language support** — The current platform is English-only. Should the PII and toxicity classifiers handle other languages from launch?
-5. **Player appeals** — Should blocked players receive any mechanism to contest a block decision?
+1. **Play Store distribution** — Is sideload acceptable, or must this pass Play policy review? Determines whether the NSFW model can be bundled in the APK.
+2. **Sensitivity default** — Is 0.65 the right out-of-the-box threshold, or should onboarding ask the user to set it?
+3. **Notification UX** — Should the persistent foreground notification show last-detection stats, or remain minimal?
+4. **FAB position** — Fixed bottom-right, or user-draggable? Draggable adds complexity but reduces obstruction complaints.
+5. **Re-blur on scroll** — If the user scrolls after a blur is applied, should the overlay auto-dismiss or persist? V1 assumption: auto-dismiss.
