@@ -1,0 +1,848 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Prime Minister — Game Intro</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;0,900;1,400;1,700&family=Cinzel:wght@400;700;900&family=EB+Garamond:ital,wght@0,400;0,500;1,400&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    width: 1280px;
+    height: 720px;
+    overflow: hidden;
+    background: #000;
+    font-family: 'Playfair Display', serif;
+  }
+
+  canvas {
+    position: absolute;
+    top: 0; left: 0;
+  }
+
+  #scene {
+    width: 1280px;
+    height: 720px;
+    position: relative;
+    background: #000;
+    overflow: hidden;
+  }
+
+  /* Sky gradient */
+  .sky {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    background: radial-gradient(ellipse at 50% 30%, #0a1628 0%, #060d1a 40%, #000 100%);
+    animation: skyPulse 8s ease-in-out infinite;
+  }
+
+  @keyframes skyPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.85; }
+  }
+
+  /* Stars */
+  .stars {
+    position: absolute;
+    width: 100%;
+    height: 60%;
+    top: 0;
+  }
+
+  /* Thames river */
+  .thames {
+    position: absolute;
+    bottom: 0;
+    width: 100%;
+    height: 120px;
+    background: linear-gradient(180deg, #0a1e3d 0%, #061428 50%, #040e1e 100%);
+    overflow: hidden;
+  }
+
+  .thames-shimmer {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    background: repeating-linear-gradient(
+      90deg,
+      transparent 0%,
+      transparent 8%,
+      rgba(180,160,80,0.04) 9%,
+      transparent 10%
+    );
+    animation: shimmer 4s linear infinite;
+  }
+
+  .thames-reflection {
+    position: absolute;
+    bottom: 0;
+    width: 100%;
+    height: 80px;
+    background: linear-gradient(
+      180deg,
+      transparent 0%,
+      rgba(200, 170, 60, 0.06) 30%,
+      rgba(200, 170, 60, 0.12) 60%,
+      rgba(200, 170, 60, 0.08) 100%
+    );
+    animation: reflectionWave 6s ease-in-out infinite;
+  }
+
+  @keyframes shimmer {
+    0% { transform: translateX(-5%); }
+    100% { transform: translateX(5%); }
+  }
+
+  @keyframes reflectionWave {
+    0%, 100% { opacity: 0.6; transform: scaleY(1); }
+    50% { opacity: 1; transform: scaleY(1.05); }
+  }
+
+  /* Westminster skyline */
+  .skyline {
+    position: absolute;
+    bottom: 100px;
+    width: 100%;
+    height: 380px;
+  }
+
+  /* Big Ben tower */
+  .bigben-wrap {
+    position: absolute;
+    bottom: 0;
+    left: 520px;
+  }
+
+  .bigben-base {
+    width: 60px;
+    height: 220px;
+    background: linear-gradient(90deg, #1a1a2e 0%, #25253d 30%, #1e1e30 70%, #111125 100%);
+    position: relative;
+  }
+
+  .bigben-clock {
+    position: absolute;
+    top: 30px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: radial-gradient(circle, #c8a84b 0%, #a07830 60%, #7a5c20 100%);
+    border: 3px solid #b89040;
+    box-shadow: 0 0 20px rgba(200, 168, 75, 0.6), 0 0 40px rgba(200, 168, 75, 0.3);
+    animation: clockGlow 3s ease-in-out infinite;
+  }
+
+  @keyframes clockGlow {
+    0%, 100% { box-shadow: 0 0 20px rgba(200, 168, 75, 0.6), 0 0 40px rgba(200, 168, 75, 0.3); }
+    50% { box-shadow: 0 0 30px rgba(200, 168, 75, 0.9), 0 0 60px rgba(200, 168, 75, 0.5); }
+  }
+
+  .clock-hand-hour {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 14px;
+    height: 3px;
+    background: #1a1a2e;
+    transform-origin: left center;
+    transform: translateY(-50%) rotate(-60deg);
+    border-radius: 2px;
+  }
+
+  .clock-hand-min {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 18px;
+    height: 2px;
+    background: #1a1a2e;
+    transform-origin: left center;
+    transform: translateY(-50%) rotate(30deg);
+    border-radius: 2px;
+    animation: minuteHand 6s linear infinite;
+  }
+
+  @keyframes minuteHand {
+    0% { transform: translateY(-50%) rotate(30deg); }
+    100% { transform: translateY(-50%) rotate(390deg); }
+  }
+
+  .bigben-spire {
+    width: 0;
+    height: 0;
+    border-left: 14px solid transparent;
+    border-right: 14px solid transparent;
+    border-bottom: 80px solid #1a1a2e;
+    position: relative;
+    left: 50%;
+    transform: translateX(-50%);
+  }
+
+  .spire-tip {
+    position: absolute;
+    top: -30px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 4px;
+    height: 30px;
+    background: linear-gradient(180deg, #c8a84b, #a07830);
+  }
+
+  /* Parliament building */
+  .parliament {
+    position: absolute;
+    bottom: 0;
+    left: 180px;
+    width: 760px;
+    height: 180px;
+  }
+
+  .parliament-main {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    height: 160px;
+    background: linear-gradient(180deg, #1e1e30 0%, #16162a 50%, #111125 100%);
+  }
+
+  .parliament-roof {
+    position: absolute;
+    top: -20px;
+    left: 0;
+    width: 100%;
+    height: 30px;
+    background: #1a1a2e;
+    clip-path: polygon(0% 100%, 2% 0%, 5% 100%, 8% 0%, 12% 100%, 15% 0%, 18% 100%, 22% 0%, 26% 100%, 30% 20%, 35% 100%, 40% 20%, 45% 100%, 50% 10%, 55% 100%, 60% 20%, 65% 100%, 70% 0%, 74% 100%, 77% 0%, 80% 100%, 83% 0%, 86% 100%, 88% 0%, 91% 100%, 94% 0%, 97% 100%, 100% 0%, 100% 100%);
+  }
+
+  /* Gothic windows on parliament */
+  .gothic-windows {
+    position: absolute;
+    bottom: 20px;
+    left: 20px;
+    display: flex;
+    gap: 12px;
+  }
+
+  .gothic-win {
+    width: 14px;
+    height: 30px;
+    background: rgba(200, 168, 75, 0.15);
+    border-radius: 7px 7px 0 0;
+    border: 1px solid rgba(200, 168, 75, 0.3);
+    box-shadow: 0 0 8px rgba(200, 168, 75, 0.2);
+    animation: windowFlicker 4s ease-in-out infinite;
+  }
+
+  .gothic-win:nth-child(odd) { animation-delay: 0.5s; }
+  .gothic-win:nth-child(3n) { animation-delay: 1.2s; }
+
+  @keyframes windowFlicker {
+    0%, 90%, 100% { background: rgba(200, 168, 75, 0.15); }
+    92% { background: rgba(200, 168, 75, 0.35); }
+    95% { background: rgba(200, 168, 75, 0.1); }
+    97% { background: rgba(200, 168, 75, 0.3); }
+  }
+
+  /* Victoria Tower left side */
+  .victoria-tower {
+    position: absolute;
+    bottom: 0;
+    left: 180px;
+    width: 70px;
+    height: 240px;
+    background: linear-gradient(90deg, #111125 0%, #1e1e30 50%, #111125 100%);
+  }
+
+  .victoria-spire {
+    position: absolute;
+    top: -50px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 0;
+    height: 0;
+    border-left: 16px solid transparent;
+    border-right: 16px solid transparent;
+    border-bottom: 60px solid #111125;
+  }
+
+  /* Fog / mist at base */
+  .mist {
+    position: absolute;
+    bottom: 100px;
+    width: 100%;
+    height: 100px;
+    background: linear-gradient(
+      180deg,
+      transparent 0%,
+      rgba(20, 30, 60, 0.3) 50%,
+      rgba(20, 30, 60, 0.6) 100%
+    );
+    animation: mistDrift 10s ease-in-out infinite;
+  }
+
+  @keyframes mistDrift {
+    0%, 100% { opacity: 0.7; transform: translateX(0); }
+    50% { opacity: 1; transform: translateX(1%); }
+  }
+
+  /* Gold particle effect */
+  .particles {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+
+  .particle {
+    position: absolute;
+    width: 2px;
+    height: 2px;
+    background: rgba(200, 168, 75, 0.8);
+    border-radius: 50%;
+    animation: particleFly linear infinite;
+  }
+
+  @keyframes particleFly {
+    0% { transform: translateY(0) translateX(0); opacity: 0; }
+    10% { opacity: 1; }
+    90% { opacity: 0.5; }
+    100% { transform: translateY(-400px) translateX(var(--drift)); opacity: 0; }
+  }
+
+  /* Text overlay layers */
+  .text-layer {
+    position: absolute;
+    width: 100%;
+    text-align: center;
+    z-index: 100;
+  }
+
+  /* "A GAME OF POWER" subtitle - appears first */
+  .tagline-top {
+    top: 120px;
+    letter-spacing: 18px;
+    font-family: 'Cinzel', serif;
+    font-size: 13px;
+    color: rgba(200, 168, 75, 0);
+    text-transform: uppercase;
+    animation: fadeInTagline 1s ease-out 1.5s forwards;
+  }
+
+  @keyframes fadeInTagline {
+    to { color: rgba(200, 168, 75, 0.85); }
+  }
+
+  /* Thin gold rule lines */
+  .rule-top {
+    top: 140px;
+    height: 1px;
+    background: transparent;
+    animation: ruleExpand 1.2s ease-out 2s forwards;
+  }
+
+  .rule-line {
+    position: absolute;
+    top: 0;
+    left: 50%;
+    width: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(200,168,75,0.6), transparent);
+    transform: translateX(-50%);
+    animation: ruleExpand 1.2s ease-out 2s forwards;
+  }
+
+  @keyframes ruleExpand {
+    to { width: 600px; }
+  }
+
+  /* PRIME MINISTER main title */
+  .title-main {
+    top: 220px;
+  }
+
+  .title-prime {
+    display: block;
+    font-family: 'Cinzel', serif;
+    font-weight: 900;
+    font-size: 96px;
+    letter-spacing: 20px;
+    color: transparent;
+    text-transform: uppercase;
+    background: linear-gradient(180deg, #e8d5a0 0%, #c8a84b 40%, #a07830 70%, #c8a84b 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    text-shadow: none;
+    filter: drop-shadow(0 0 40px rgba(200, 168, 75, 0.5));
+    opacity: 0;
+    transform: translateY(30px) scale(0.95);
+    animation: titleReveal 1.8s cubic-bezier(0.16, 1, 0.3, 1) 2.5s forwards;
+    line-height: 1;
+  }
+
+  .title-minister {
+    display: block;
+    font-family: 'Cinzel', serif;
+    font-weight: 400;
+    font-size: 96px;
+    letter-spacing: 32px;
+    color: transparent;
+    text-transform: uppercase;
+    background: linear-gradient(180deg, #e8d5a0 0%, #c8a84b 40%, #a07830 70%, #c8a84b 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    filter: drop-shadow(0 0 40px rgba(200, 168, 75, 0.5));
+    opacity: 0;
+    transform: translateY(30px) scale(0.95);
+    animation: titleReveal 1.8s cubic-bezier(0.16, 1, 0.3, 1) 3s forwards;
+    line-height: 1;
+    margin-top: -8px;
+  }
+
+  @keyframes titleReveal {
+    0% { opacity: 0; transform: translateY(30px) scale(0.95); }
+    100% { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  /* Rule below title */
+  .rule-bottom {
+    top: 420px;
+  }
+
+  .rule-bottom .rule-line {
+    animation: ruleExpand 1.2s ease-out 3.8s forwards;
+  }
+
+  /* Subtitle below rule */
+  .subtitle {
+    top: 440px;
+    font-family: 'EB Garamond', serif;
+    font-style: italic;
+    font-size: 22px;
+    letter-spacing: 6px;
+    color: rgba(200, 168, 75, 0);
+    animation: fadeInSub 1.5s ease-out 4.2s forwards;
+  }
+
+  @keyframes fadeInSub {
+    to { color: rgba(200, 168, 75, 0.7); }
+  }
+
+  /* "The Road to Number 10" */
+  .road-text {
+    top: 480px;
+    font-family: 'EB Garamond', serif;
+    font-size: 16px;
+    letter-spacing: 10px;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0);
+    animation: fadeInRoad 1.5s ease-out 5s forwards;
+  }
+
+  @keyframes fadeInRoad {
+    to { color: rgba(255, 255, 255, 0.35); }
+  }
+
+  /* Bottom tagline */
+  .tagline-bottom {
+    bottom: 140px;
+    font-family: 'Cinzel', serif;
+    font-size: 11px;
+    letter-spacing: 8px;
+    color: rgba(200, 168, 75, 0);
+    text-transform: uppercase;
+    animation: fadeInBottom 1.5s ease-out 6s forwards;
+  }
+
+  @keyframes fadeInBottom {
+    to { color: rgba(200, 168, 75, 0.5); }
+  }
+
+  /* Crown / portcullis icon */
+  .crown-icon {
+    position: absolute;
+    top: 155px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 28px;
+    opacity: 0;
+    animation: crownFade 1s ease-out 2.2s forwards;
+    filter: drop-shadow(0 0 10px rgba(200, 168, 75, 0.8));
+  }
+
+  @keyframes crownFade {
+    to { opacity: 0.9; }
+  }
+
+  /* Vignette overlay */
+  .vignette {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    background: radial-gradient(
+      ellipse at 50% 50%,
+      transparent 40%,
+      rgba(0,0,0,0.5) 80%,
+      rgba(0,0,0,0.85) 100%
+    );
+    z-index: 50;
+    pointer-events: none;
+  }
+
+  /* Full scene fade in */
+  #scene {
+    animation: sceneFadeIn 2s ease-out 0s forwards;
+  }
+
+  @keyframes sceneFadeIn {
+    0% { opacity: 0; }
+    100% { opacity: 1; }
+  }
+
+  /* Cinematic bars */
+  .bar-top {
+    position: absolute;
+    top: 0;
+    width: 100%;
+    height: 60px;
+    background: #000;
+    z-index: 200;
+    animation: barRetract 1.2s ease-out 0.5s forwards;
+  }
+
+  .bar-bottom {
+    position: absolute;
+    bottom: 0;
+    width: 100%;
+    height: 60px;
+    background: #000;
+    z-index: 200;
+    animation: barRetract 1.2s ease-out 0.5s forwards;
+  }
+
+  @keyframes barRetract {
+    to { height: 0px; }
+  }
+
+  /* Red dispatch box on desk (decorative) */
+  .dispatch-box {
+    position: absolute;
+    bottom: 130px;
+    left: 80px;
+    width: 70px;
+    height: 45px;
+    background: linear-gradient(135deg, #8b0000 0%, #6b0000 50%, #5a0000 100%);
+    border-radius: 3px;
+    border: 1px solid rgba(200, 168, 75, 0.4);
+    opacity: 0;
+    animation: boxFadeIn 1s ease-out 5.5s forwards;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.1);
+  }
+
+  .dispatch-clasp {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 12px;
+    height: 8px;
+    background: rgba(200, 168, 75, 0.8);
+    border-radius: 2px;
+  }
+
+  .dispatch-label {
+    position: absolute;
+    bottom: -16px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-family: 'Cinzel', serif;
+    font-size: 7px;
+    letter-spacing: 1px;
+    color: rgba(200, 168, 75, 0.4);
+    white-space: nowrap;
+  }
+
+  @keyframes boxFadeIn {
+    to { opacity: 1; }
+  }
+
+  /* Number 10 door (right side) */
+  .door-wrap {
+    position: absolute;
+    bottom: 125px;
+    right: 80px;
+    opacity: 0;
+    animation: boxFadeIn 1s ease-out 5.8s forwards;
+  }
+
+  .door {
+    width: 42px;
+    height: 60px;
+    background: linear-gradient(180deg, #0a0a0a 0%, #111 100%);
+    border-radius: 2px 2px 0 0;
+    border: 1px solid #222;
+    position: relative;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.8);
+  }
+
+  .door-arch {
+    position: absolute;
+    top: -14px;
+    left: -1px;
+    width: 44px;
+    height: 28px;
+    border-radius: 22px 22px 0 0;
+    background: #0a0a0a;
+    border: 1px solid #222;
+    border-bottom: none;
+  }
+
+  .door-number {
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-family: 'Cinzel', serif;
+    font-size: 14px;
+    font-weight: 700;
+    color: rgba(200, 168, 75, 0.9);
+    letter-spacing: 1px;
+  }
+
+  .door-knocker {
+    position: absolute;
+    bottom: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: rgba(200, 168, 75, 0.7);
+    border: 1px solid rgba(200, 168, 75, 0.4);
+  }
+
+  .door-pillar-l, .door-pillar-r {
+    position: absolute;
+    bottom: 0;
+    width: 6px;
+    height: 64px;
+    background: linear-gradient(90deg, #1a1a1a, #2a2a2a, #1a1a1a);
+    border-radius: 1px;
+  }
+
+  .door-pillar-l { left: -8px; }
+  .door-pillar-r { right: -8px; }
+
+  .door-label {
+    position: absolute;
+    bottom: -16px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-family: 'Cinzel', serif;
+    font-size: 7px;
+    letter-spacing: 1px;
+    color: rgba(200, 168, 75, 0.4);
+    white-space: nowrap;
+  }
+
+  /* Final glow on title */
+  .title-glow {
+    position: absolute;
+    top: 200px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 800px;
+    height: 300px;
+    background: radial-gradient(ellipse, rgba(200, 168, 75, 0.08) 0%, transparent 70%);
+    opacity: 0;
+    animation: glowPulse 3s ease-in-out 3.5s infinite;
+    pointer-events: none;
+    z-index: 99;
+  }
+
+  @keyframes glowPulse {
+    0%, 100% { opacity: 0.5; transform: translateX(-50%) scale(1); }
+    50% { opacity: 1; transform: translateX(-50%) scale(1.05); }
+  }
+
+</style>
+</head>
+<body>
+<div id="scene">
+
+  <!-- Background sky -->
+  <div class="sky"></div>
+
+  <!-- Stars (canvas drawn by JS) -->
+  <canvas id="starCanvas" width="1280" height="720" style="position:absolute;top:0;left:0;opacity:0.8;"></canvas>
+
+  <!-- Parliament structure -->
+  <div class="skyline">
+    <!-- Victoria Tower -->
+    <div class="victoria-tower">
+      <div class="victoria-spire"></div>
+    </div>
+
+    <!-- Main parliament building -->
+    <div class="parliament">
+      <div class="parliament-main">
+        <div class="parliament-roof"></div>
+        <div class="gothic-windows">
+          <div class="gothic-win"></div><div class="gothic-win"></div>
+          <div class="gothic-win"></div><div class="gothic-win"></div>
+          <div class="gothic-win"></div><div class="gothic-win"></div>
+          <div class="gothic-win"></div><div class="gothic-win"></div>
+          <div class="gothic-win"></div><div class="gothic-win"></div>
+          <div class="gothic-win"></div><div class="gothic-win"></div>
+          <div class="gothic-win"></div><div class="gothic-win"></div>
+          <div class="gothic-win"></div><div class="gothic-win"></div>
+          <div class="gothic-win"></div><div class="gothic-win"></div>
+          <div class="gothic-win"></div><div class="gothic-win"></div>
+          <div class="gothic-win"></div><div class="gothic-win"></div>
+          <div class="gothic-win"></div><div class="gothic-win"></div>
+          <div class="gothic-win"></div><div class="gothic-win"></div>
+          <div class="gothic-win"></div><div class="gothic-win"></div>
+          <div class="gothic-win"></div><div class="gothic-win"></div>
+          <div class="gothic-win"></div><div class="gothic-win"></div>
+          <div class="gothic-win"></div><div class="gothic-win"></div>
+          <div class="gothic-win"></div><div class="gothic-win"></div>
+          <div class="gothic-win"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Big Ben -->
+    <div class="bigben-wrap">
+      <div class="bigben-spire">
+        <div class="spire-tip"></div>
+      </div>
+      <div class="bigben-base">
+        <div class="bigben-clock">
+          <div class="clock-hand-hour"></div>
+          <div class="clock-hand-min"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Mist -->
+  <div class="mist"></div>
+
+  <!-- Thames -->
+  <div class="thames">
+    <div class="thames-shimmer"></div>
+    <div class="thames-reflection"></div>
+  </div>
+
+  <!-- Gold particles -->
+  <div class="particles" id="particles"></div>
+
+  <!-- Vignette -->
+  <div class="vignette"></div>
+
+  <!-- Title glow -->
+  <div class="title-glow"></div>
+
+  <!-- TEXT LAYERS -->
+  <div class="text-layer tagline-top">A Game of Power &amp; Strategy</div>
+
+  <div class="crown-icon">⚜</div>
+
+  <div class="text-layer rule-top"><div class="rule-line"></div></div>
+
+  <div class="text-layer title-main">
+    <span class="title-prime">Prime</span>
+    <span class="title-minister">Minister</span>
+  </div>
+
+  <div class="text-layer rule-bottom"><div class="rule-line"></div></div>
+
+  <div class="text-layer subtitle">The Road to Number 10</div>
+
+  <div class="text-layer road-text">Westminster Awaits</div>
+
+  <!-- Dispatch box -->
+  <div class="dispatch-box">
+    <div class="dispatch-clasp"></div>
+    <div class="dispatch-label">CABINET PAPERS</div>
+  </div>
+
+  <!-- Number 10 door -->
+  <div class="door-wrap">
+    <div class="door">
+      <div class="door-arch"></div>
+      <div class="door-number">10</div>
+      <div class="door-knocker"></div>
+      <div class="door-pillar-l"></div>
+      <div class="door-pillar-r"></div>
+    </div>
+    <div class="door-label">DOWNING STREET</div>
+  </div>
+
+  <div class="text-layer tagline-bottom">Can you rise from Backbench MP to Prime Minister?</div>
+
+  <!-- Cinematic bars -->
+  <div class="bar-top"></div>
+  <div class="bar-bottom"></div>
+</div>
+
+<script>
+// Draw stars
+const canvas = document.getElementById('starCanvas');
+const ctx = canvas.getContext('2d');
+const stars = [];
+
+for (let i = 0; i < 200; i++) {
+  stars.push({
+    x: Math.random() * 1280,
+    y: Math.random() * 400,
+    r: Math.random() * 1.2 + 0.2,
+    alpha: Math.random() * 0.8 + 0.2,
+    twinkleSpeed: Math.random() * 0.02 + 0.005,
+    twinkleOffset: Math.random() * Math.PI * 2
+  });
+}
+
+let frame = 0;
+function drawStars() {
+  ctx.clearRect(0, 0, 1280, 720);
+  stars.forEach(s => {
+    const twinkle = Math.sin(frame * s.twinkleSpeed + s.twinkleOffset) * 0.3 + 0.7;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255, 255, 220, ${s.alpha * twinkle})`;
+    ctx.fill();
+  });
+  frame++;
+  requestAnimationFrame(drawStars);
+}
+drawStars();
+
+// Create gold particles
+const particleContainer = document.getElementById('particles');
+function createParticle() {
+  const p = document.createElement('div');
+  p.className = 'particle';
+  p.style.left = (Math.random() * 1280) + 'px';
+  p.style.bottom = (Math.random() * 100 + 80) + 'px';
+  p.style.setProperty('--drift', (Math.random() * 60 - 30) + 'px');
+  const duration = Math.random() * 6 + 4;
+  p.style.animationDuration = duration + 's';
+  p.style.animationDelay = (Math.random() * 4) + 's';
+  p.style.opacity = Math.random() * 0.6 + 0.2;
+  particleContainer.appendChild(p);
+  setTimeout(() => p.remove(), (duration + 4) * 1000);
+}
+
+// Spawn particles periodically
+setInterval(createParticle, 200);
+for (let i = 0; i < 30; i++) createParticle();
+</script>
+</body>
+</html>
