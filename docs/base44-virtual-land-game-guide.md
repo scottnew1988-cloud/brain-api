@@ -432,6 +432,286 @@ for rent → have a second test account rent it → check the leaderboard update
 
 ---
 
+# Part 2 — Commercial Real Estate & In-Game Shopping
+
+Everything above is the core residential/land-ownership loop. This part adds a
+parallel commercial path on top of it: landowners can develop commercial plots
+and lease the building to a **Business** (representing a real company), which
+then sells products through an in-game storefront. The storefront and checkout
+are one shared system owned by you (the admin) — every sale is split between
+the business and your platform automatically, the same way rent is split
+today.
+
+Do this only after Part 1 (Steps 1–11) is working — it reuses the zoning,
+development, and rent-billing patterns already built, rather than duplicating
+them.
+
+---
+
+## Step 12 — Commercial data model
+
+```
+Extend the data model to support commercial real estate that can be leased to
+businesses who sell products through an in-game shop. This sits alongside
+everything already built — players still buy/develop/resell land and rent to
+other players exactly as before; this adds a separate, business-only path for
+commercial buildings.
+
+New entities:
+
+1. Business:
+   - business_name (text)
+   - description (text)
+   - category (enum: retail, food_and_drink, services, entertainment, other)
+   - logo_url (file/text)
+   - owner_user_id (relation to User) — the player account operating this business
+   - status (enum: pending_approval, active, suspended) default pending_approval
+   - wallet_balance (number, default 0) — the business's own earnings balance,
+     separate from the owning player's personal wallet_balance
+   - created_date (date)
+
+2. Lease:
+   - plot_id (relation to Plot)
+   - landlord_id (relation to User) — the plot's owner
+   - business_id (relation to Business, nullable until a business applies)
+   - rent_price (number)
+   - billing_period_days (number, default 30)
+   - status (enum: available_for_lease, pending_landlord_approval, active, ended)
+   - lease_start (date, nullable)
+   - next_payment_due (date, nullable)
+   - auto_renew (boolean, default true)
+
+3. Product:
+   - business_id (relation to Business)
+   - name (text)
+   - description (text)
+   - price (number)
+   - image_url (file/text)
+   - stock_quantity (number, nullable — leave blank for unlimited/digital goods)
+   - category (text)
+   - is_active (boolean, default true)
+
+4. Order:
+   - buyer_id (relation to User)
+   - business_id (relation to Business)
+   - items (JSON — array of {product_id, product_name, unit_price, quantity})
+   - subtotal (number)
+   - platform_fee (number)
+   - total (number)
+   - status (enum: paid, fulfilled, cancelled) default paid
+   - created_date (date)
+
+5. Update Plot: add commercial_lease_id (relation to Lease, nullable) linking
+   to its current active lease, if any.
+
+6. Update the Transaction "type" enum to also include: commercial_lease_payment,
+   product_sale.
+
+Don't build any UI yet — just get this schema in place correctly and confirm
+it in the Entities tab before continuing.
+```
+
+**Check:** confirm all 4 new entities and the 2 field/enum updates exist as
+described.
+
+---
+
+## Step 13 — Business accounts & approval
+
+```
+Add the ability for players to register and run a business:
+
+1. Add a "Start a Business" flow, reachable from the main nav: a form
+   collecting business_name, description, category, logo_url. On submit,
+   create a Business record with owner_user_id = current user, status =
+   pending_approval.
+2. Build a Business Dashboard page (visible only to the business's
+   owner_user_id, or to admins) showing the business's status, wallet_balance,
+   its current Lease if any, and tabs for "Products" and "Orders" — empty
+   states are fine for now, Steps 15-16 fill these in.
+3. In the Admin Panel, add a "Businesses" tab: list all Business records,
+   filterable by status, and let me approve (status -> active) or reject/
+   suspend (status -> suspended) any business, with an optional reason logged.
+4. Only businesses with status = active can apply for a commercial lease or
+   list products — enforce this both in the UI and in the backend logic.
+   Pending/suspended businesses see a clear status message instead of the
+   Products/Orders tabs.
+5. Email the business owner when their business is approved or suspended.
+```
+
+**Check:** register a test business, confirm it's `pending_approval` and
+locked out of leasing/products, approve it from the Admin Panel, confirm the
+owner gets an email and the dashboard unlocks.
+
+---
+
+## Step 14 — Leasing commercial land to businesses
+
+```
+Add commercial leasing on top of existing land ownership:
+
+1. A Plot is eligible for business leasing only if: its District's zone_type
+   is commercial, AND the plot has been developed with building_type = shop
+   (using the existing development system from earlier steps).
+2. On an eligible plot the current user owns, add a "List for Business Lease"
+   action next to the existing "List for Rent" (List for Rent still works as
+   before, for renting to other players — this is a separate, business-only
+   path). The owner enters rent_price and billing_period_days, creating a
+   Lease record with status = available_for_lease linked to that plot.
+3. Add a "Commercial Units" tab to the existing Marketplace page listing every
+   Plot with an available_for_lease Lease: district, plot_code, rent_price,
+   billing_period_days.
+4. A user managing an active Business can click "Apply to Lease" on a listing.
+   This sets the Lease's business_id and status = pending_landlord_approval,
+   and notifies the landlord.
+5. The landlord sees pending applications on their Plot Detail page (or a "My
+   Leases" section of the Dashboard) and can Approve or Reject:
+   - Approve: Lease status = active, lease_start = now, next_payment_due =
+     now + billing_period_days; set Plot.commercial_lease_id to this lease and
+     Plot.status = leased_commercial.
+   - Reject: clear business_id, revert Lease status = available_for_lease.
+6. Add a recurring job, following the same pattern as the residential rent job
+   from Step 9: when next_payment_due arrives, charge rent_price from the
+   Business's wallet_balance to the landlord's wallet_balance minus a
+   commercial lease platform fee, then advance next_payment_due by
+   billing_period_days. If the Business can't pay: Lease status = ended, clear
+   Plot.commercial_lease_id, revert Plot.status, notify both parties. Record
+   every payment as a Transaction (type = commercial_lease_payment).
+```
+
+**Check:** as a landowner, develop a commercial plot with a shop, list it for
+business lease. As a test business, apply. Approve it as the landlord, and
+confirm the recurring rent job charges correctly (shorten the billing period
+for testing if you can).
+
+---
+
+## Step 15 — In-game storefronts
+
+```
+Add the visual, browsable storefront for each leased commercial unit:
+
+1. When a Plot with status = leased_commercial is clicked on the World Map,
+   its Plot Detail view should show the leasing Business's storefront instead
+   of plain plot info: logo, business_name, description, category, and a grid
+   of that business's active Products (built next step) with "View Product" /
+   "Add to Cart" actions. Keep a small collapsed "Land Info" section below
+   showing the landlord and lease terms, for transparency.
+2. On the Business Dashboard's "Products" tab, let the business owner add,
+   edit, deactivate, and delete Products (name, description, price,
+   image_url, stock_quantity, category).
+3. Add a global "Shopping" page, separate from the map: lists all active
+   Products from all active leased businesses, with search and category
+   filters — a directory of every store in the world, browsable without
+   navigating the physical map.
+```
+
+**Check:** add a couple of products as the test business, confirm they show
+up both on the plot's storefront view and on the global Shopping page.
+
+---
+
+## Step 16 — Shopping cart, checkout & the platform-owned payment split
+
+```
+Build the actual purchasing flow — this is the platform-owned shopping system
+that ties everything together:
+
+1. Add a persistent shopping cart (can hold products from multiple different
+   businesses at once), with an icon/counter in the top nav and standard add/
+   remove/adjust-quantity behaviour.
+2. Build a Checkout page: shows cart contents grouped by business, subtotal,
+   a platform_fee_percent (admin-configurable, default 8%) applied per
+   business's line items, and the total. On confirm:
+   - Check the buyer's wallet_balance >= total; block with an error if not.
+   - Deduct total from the buyer's wallet_balance.
+   - For each business represented in the cart: create one Order (buyer_id,
+     business_id, items = that business's line items, subtotal, platform_fee,
+     total = subtotal - platform_fee), credit (subtotal - platform_fee) to
+     that Business's wallet_balance, credit platform_fee to my admin User's
+     wallet_balance, and create a matching Transaction (type = product_sale).
+   - For any Product with a numeric stock_quantity, decrement it by the
+     purchased quantity (skip this for products with no stock_quantity set —
+     treat those as unlimited/digital).
+   - Clear the cart and show an order confirmation screen.
+3. Email the buyer a receipt (order number, itemized list, total) and notify
+   each business owner by email/in-app notification of their new order(s).
+4. On the Business Dashboard's "Orders" tab, list that business's Orders with
+   buyer name, items, total, date, and status, and let the owner mark an order
+   "fulfilled" (a status flag for record-keeping — no physical shipping logic
+   needed).
+```
+
+**Check:** add products from two different test businesses to one cart,
+checkout, confirm: buyer's balance drops by the full total, each business's
+wallet_balance increases by its share minus the fee, your admin wallet
+receives the combined platform fees, both an Order and Transaction exist per
+business, and both buyer and sellers get notified.
+
+---
+
+## Step 17 — Admin oversight of the commercial economy
+
+```
+Extend the Admin Panel:
+
+1. Add a "Marketplace" tab: total product_sale revenue, total
+   commercial_lease_payment revenue, my platform wallet_balance breakdown by
+   source, and a live feed of recent Orders and commercial Leases across the
+   game.
+2. Add a "Marketplace Settings" section letting me edit the global
+   platform_fee_percent (used at checkout) and a separate
+   commercial_lease_fee_percent (used on lease rent payments).
+3. Let me moderate individual Products (deactivate one without suspending the
+   whole business) and view/force-end any Lease (e.g. for a policy
+   violation), with a required reason logged — same pattern as the existing
+   plot moderation tools from Step 10.
+4. Add the count of active Businesses and total commercial GMV (gross
+   merchandise value across all Orders) to the existing Economy tab.
+```
+
+**Check:** confirm the Marketplace tab's numbers match what you'd expect from
+your test orders and lease payments, and that changing platform_fee_percent
+changes what a new checkout charges.
+
+---
+
+## Step 18 — Optional stretch: multi-unit malls
+
+Only attempt this once Steps 12–17 are fully working and tested.
+
+```
+Add a "Shopping Mall" building type (allowed_zones=[commercial], higher cost,
+only buildable at development_level 4+) that supports up to 4 separate Lease
+slots on a single Plot instead of just one, so a single landowner can lease to
+multiple businesses from one plot — like a real shopping mall with several
+units. This changes the Plot/Lease relationship from one-to-one to
+one-to-many: a mall Plot can have several active Leases at once (one per
+unit slot), while a plain Shop Plot still supports at most one.
+```
+
+---
+
+## Commercial flow QA checklist
+
+- [ ] Register a business, confirm it's blocked until admin approval
+- [ ] Approve it as admin, confirm the owner is emailed and the dashboard unlocks
+- [ ] Develop a commercial plot with a shop, list it for business lease
+- [ ] Apply to lease it as the business, approve as landlord, confirm the
+      plot shows as leased and the storefront renders
+- [ ] Confirm the recurring lease-rent job charges the business and pays the
+      landlord (minus platform fee) on schedule, and lapses gracefully if the
+      business can't pay
+- [ ] Add products as the business, confirm they appear on the plot storefront
+      and the global Shopping page
+- [ ] Buy from two different businesses in one cart checkout, confirm the
+      payment split (business wallets, your admin wallet) and stock
+      decrements are correct
+- [ ] Confirm buyer receipt email and business order notifications arrive
+- [ ] Confirm the Admin Marketplace tab's revenue numbers and fee settings work
+
+---
+
 ## Manual QA checklist (do this after Step 11, not a Base44 prompt)
 
 - [ ] Sign up as two separate test players + confirm your admin account
